@@ -43,6 +43,17 @@ char g_ip_addr[64] = DEFAULT_STATIC_IP_ADDR;
 char g_ssid[64] = DEFAULT_WIFI_STA_SSID;
 char g_pass[64] = DEFAULT_WIFI_STA_PASS;
 
+#define DEFAULT_DUTY_RESOLUTION LEDC_TIMER_8_BIT
+
+int bit = 8;
+
+signed int s = 0;
+float Kp = 0.01;
+float Ki = 0;
+float Kd = 0;
+float  min_freq = 50;
+signed int goal = 1200;
+
 QueueHandle_t g_command_queue;
 
 bool g_flag_send_telemetry = false;
@@ -86,6 +97,11 @@ char* build_config_string(bool for_nvs)
     cJSON_AddNumberToObject(json, STR_PAUSE, g_pause_ms);
     cJSON_AddNumberToObject(json, STR_CALIBRATION_TIMEOUT, g_calibration_timeout_ms);
     cJSON_AddNumberToObject(json, STR_FLAG_SEND_TELEMETRY, g_flag_send_telemetry);
+    cJSON_AddNumberToObject(json, "goal", goal);
+    cJSON_AddNumberToObject(json, "Kp", Kp);
+    cJSON_AddNumberToObject(json, "Ki", Ki);
+    cJSON_AddNumberToObject(json, "Kd", Kd);
+    cJSON_AddNumberToObject(json, "min_freq", min_freq);
 
     if (!for_nvs)
     {
@@ -135,6 +151,11 @@ void parse_config_string(const char *str)
             if (!strcmp(param_name, STR_PAUSE)) g_pause_ms = subitem->valueint;
             if (!strcmp(param_name, STR_CALIBRATION_TIMEOUT)) g_calibration_timeout_ms = subitem->valueint;
             if (!strcmp(param_name, STR_FLAG_SEND_TELEMETRY)) g_flag_send_telemetry = subitem->valueint;
+            if (!strcmp(param_name, "goal")) goal = subitem->valueint;
+            if (!strcmp(param_name, "Kp")) Kp = subitem->valuedouble;
+            if (!strcmp(param_name, "Ki")) Ki = subitem->valuedouble;
+            if (!strcmp(param_name, "Kd")) Kd = subitem->valuedouble;
+            if (!strcmp(param_name, "min_freq")) min_freq = subitem->valueint;
 
             if (!strcmp(param_name, STR_CMD_READ_FLASH) && subitem->valueint) nvs_read_config();
             if (!strcmp(param_name, STR_CMD_WRITE_FLASH) && subitem->valueint) nvs_write_config();
@@ -191,18 +212,40 @@ void command_processing_task(void *pvParameters)
 static void IRAM_ATTR do_step(bool dir, uint32_t n_steps, long step_period, bool flag_wait)
 {
     ledc_timer_config_t ledc_timer1 = {
-        .speed_mode       = LEDC_HIGH_SPEED_MODE,
-        .duty_resolution  = LEDC_TIMER_1_BIT ,
+        .speed_mode       = LEDC_LOW_SPEED_MODE,
+        .duty_resolution  = DEFAULT_DUTY_RESOLUTION ,
         .timer_num        = LEDC_TIMER_0,
-        .freq_hz          = 1e6 / (step_period),  // Set output frequency according to g_step_period_us
+        .freq_hz          = step_period,  // Set output frequency according to g_step_period_us
         .clk_cfg          = LEDC_AUTO_CLK
     };
     ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer1));
 
     gpio_set_level(PIN_DIR, dir);
+    
+    //ledc_set_fade(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 1, LEDC_DUTY_DIR_DECREASE, 1, n_steps, 1);
+    //ledc_fade_start(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, flag_wait ? LEDC_FADE_WAIT_DONE : LEDC_FADE_NO_WAIT);
+}
 
-    ledc_set_fade(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 1, LEDC_DUTY_DIR_DECREASE, 1, n_steps, 1);
-    ledc_fade_start(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, flag_wait ? LEDC_FADE_WAIT_DONE : LEDC_FADE_NO_WAIT);
+static void IRAM_ATTR funA(void *param)
+{
+    int a = gpio_get_level(PIN_A);
+    int b = gpio_get_level(PIN_B);
+
+    if (a == 1 && b == 1) s-=1;
+    if (a == 1 && b == 0) s+=1;
+    if (a == 0 && b == 1) s+=1;
+    if (a == 0 && b == 0) s-=1;
+}
+
+static void IRAM_ATTR funB(void *param)
+{
+    int a = gpio_get_level(PIN_A);
+    int b = gpio_get_level(PIN_B);
+
+    if (b == 1 && a == 1) s+=1;
+    if (b == 1 && a == 0) s-=1;
+    if (b == 0 && a == 1) s-=1;
+    if (b == 0 && a == 0) s+=1;
 }
 
 void IRAM_ATTR sense_stop_isr(void *arg)
@@ -232,12 +275,27 @@ void init_pins()
     gpio_set_direction(PIN_LED, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_LED, 1);
 
+    gpio_reset_pin(PIN_A);
+    gpio_set_direction(PIN_A, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(PIN_A, GPIO_PULLUP_ONLY);
+
+    gpio_reset_pin(PIN_B);
+    gpio_set_direction(PIN_B, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(PIN_B, GPIO_PULLUP_ONLY);
+
+
     //install gpio isr service
     gpio_install_isr_service(0);
 
     //hook isr handler for specific gpio pin
     gpio_isr_handler_add(PIN_STOP, sense_stop_isr, xTaskGetCurrentTaskHandle());
     gpio_set_intr_type(PIN_STOP, GPIO_INTR_ANYEDGE);
+
+    gpio_isr_handler_add(PIN_A, funA, 0);
+    gpio_set_intr_type(PIN_A, GPIO_INTR_ANYEDGE);
+
+    gpio_isr_handler_add(PIN_B, funB, 0);
+    gpio_set_intr_type(PIN_B, GPIO_INTR_ANYEDGE);
 }
 
 void nvs_read_config()
@@ -348,11 +406,29 @@ void calibrate_stepper()
     vTaskDelay(pdMS_TO_TICKS(1000));    
 }
 
+int step_max = 100;
+long step_acc = 0;
+int step;
+
+float r = 1;
+int dir = 1;
+float u = 0;
+float r_prev = 0;
+float r_prev_prev = 0;
+float u_prev = 0;
+//float dt = g_step_fwd_period_us; //us
+bool flag = 0;
+
+static float u_integral = 0;     
+static float u_prev_error = 0;   
+static bool g_pid_enabled = true;   
+static  bool timer_paused = false; 
+
+
 void app_main(void)
 {
     init_pins();
-
-    // Initialize NVS
+    
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) 
     {
@@ -368,36 +444,10 @@ void app_main(void)
     t_eth_config config = {.ip = g_ip_addr, .pass = g_pass, .ssid = g_ssid, .use_eth = USE_COMMM_ETHERNET, .use_wifi_ap = USE_COMMM_WIFI_AP, .use_wifi_sta = USE_COMMM_WIFI_STA};
     eth_start(config);
 
-    // Initialise LEDC PWM controller
-    ledc_timer_config_t ledc_timer1 = {
-        .speed_mode       = LEDC_HIGH_SPEED_MODE,
-        .duty_resolution  = LEDC_TIMER_1_BIT ,
-        .timer_num        = LEDC_TIMER_0,
-        .freq_hz          = 1e6 / g_step_bwd_period_us,  // Set output frequency according to g_step_period_us
-        .clk_cfg          = LEDC_AUTO_CLK
-    };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer1));
-
-    ledc_channel_config_t ledc_channel1 = {
-        .speed_mode     = LEDC_HIGH_SPEED_MODE,
-        .channel        = LEDC_CHANNEL_0,
-        .timer_sel      = LEDC_TIMER_0,
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = PIN_STEP,
-        .duty           = 0, // Set duty to 0%
-        .hpoint         = 0
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel1));
-
-    ledc_stop(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
-
-    ledc_fade_func_install(0);
-
-    gpio_dump_io_configuration(stdout, SOC_GPIO_VALID_GPIO_MASK);
-    vTaskDelay(pdMS_TO_TICKS(300));
-    //esp_intr_dump(NULL);
-
-    calibrate_stepper();
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    float u = 0;           // Управляющий сигнал
+    float r = 0;           // Ошибка
+    int dir = 1;           // Направление
 
     g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
     assert(g_command_queue != NULL);
@@ -407,29 +457,102 @@ void app_main(void)
         xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 1, NULL);
         xTaskCreate(udp_server_task, "udp_server", 4096, (void*)AF_INET, 1, NULL);
     }
+    
+    ledc_timer_config_t ledc_timer1 = {
+        .speed_mode       = LEDC_LOW_SPEED_MODE,
+        .duty_resolution  = DEFAULT_DUTY_RESOLUTION,
+        .timer_num        = LEDC_TIMER_0,
+        .freq_hz          = min_freq,
+        .clk_cfg          = LEDC_AUTO_CLK
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer1));
 
-    int step_max = 512;
-    long step_acc = 0;
+    ledc_channel_config_t ledc_channel1 = {
+        .speed_mode     = LEDC_LOW_SPEED_MODE,
+        .channel        = LEDC_CHANNEL_0,
+        .timer_sel      = LEDC_TIMER_0,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = PIN_STEP,
+        .duty           = (int)(pow(2, bit - 1)),
+        .hpoint         = 0
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel1));
 
+    ESP_LOGI(TAG, "PID control task started");
+
+    
     while (1)
     {
-        step_acc = 0;
-        gpio_set_level(PIN_LED, 1);
-        while (step_acc < g_steps)
+        signed int r = goal - s; 
+
+        if (abs(r) > 2 && !g_pid_enabled)
         {
-            do_step(1, min(step_max, g_steps-step_acc), g_step_fwd_period_us, true);
-            step_acc += step_max;
+            ESP_LOGI(TAG, "Auto-return: was at target, now error=%d, restarting PID", abs(r));
+            g_pid_enabled = true;
+            //timer_paused = false;  
         }
-        gpio_set_level(PIN_LED, 0);
-        vTaskDelay(pdMS_TO_TICKS(g_pause_ms));
-        gpio_set_level(PIN_LED, 1);
-        step_acc = 0;
-        while (step_acc < g_steps)
+
+        //ESP_LOGI(TAG, "s=%i, goal=%i, r=%f", s, goal, r);
+        if (g_pid_enabled && abs(r) > 2) 
+        {      
+            if (timer_paused) 
+            {
+                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, bit - 1)));  
+                ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+                timer_paused = false;
+                ESP_LOGI(TAG, "Timer resumed");
+            }
+
+            float p_term = Kp * r;
+            
+            
+            u_integral += r;
+            if (u_integral > 1000) u_integral = 1000;
+            if (u_integral < -1000) u_integral = -1000;
+            float i_term = Ki * u_integral;
+            
+           
+            float d_term = Kd * (r - u_prev_error);
+            u_prev_error = r;
+            
+           
+            u = p_term + i_term + d_term;
+            
+            int u_max = 2000;
+            if (u > u_max) u = u_max;
+            if (u < -u_max) u = -u_max;
+
+           
+            dir = (u >= 0) ? 1 : 0;
+            float frequency = abs(u);
+            if (frequency < min_freq) frequency = min_freq;
+
+            gpio_set_level(PIN_DIR, dir);
+            
+           
+            ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, (uint32_t)frequency);
+            ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+        }
+        else
         {
-            do_step(0, min(step_max, g_steps-step_acc), g_step_bwd_period_us, true);
-            step_acc += step_max;
+            // Остановка ШИМ при достижении цели или выключении ПИД
+            if (!timer_paused && abs(r) <= 2) {
+                // Устанавливаем скважность 0% - нет импульсов, но таймер работает
+                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+                timer_paused = true;
+                g_pid_enabled = false;
+                ESP_LOGI(TAG, "Timer paused (duty=0)");
+            }
+            
         }
-        gpio_set_level(PIN_LED, 0);
-        vTaskDelay(pdMS_TO_TICKS(g_pause_ms));
+
+        static int log_count = 0;
+        if (log_count++ % 50 == 0) 
+        {
+            ESP_LOGI(TAG, "s=%i, goal=%i, err=%d\n", s, goal, r);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
-}
+ }
