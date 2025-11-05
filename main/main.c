@@ -26,11 +26,53 @@
 #include <math.h>
 
 #ifndef max
-#define max(a,b)            (((a) > (b)) ? (a) : (b))
+    #define max(a,b)            (((a) > (b)) ? (a) : (b))
 #endif
 
 #ifndef min
-#define min(a,b)            (((a) < (b)) ? (a) : (b))
+    #define min(a,b)            (((a) < (b)) ? (a) : (b))
+#endif
+
+#if (DUTY_RESOLUTION_BIT == 1) 
+    #define DUTY_RESOLUTION LEDC_TIMER_1_BIT 
+#elif (DUTY_RESOLUTION_BIT == 2) 
+    #define DUTY_RESOLUTION LEDC_TIMER_2_BIT
+#elif (DUTY_RESOLUTION_BIT == 3) 
+    #define DUTY_RESOLUTION LEDC_TIMER_3_BIT
+#elif (DUTY_RESOLUTION_BIT == 4) 
+    #define DUTY_RESOLUTION LEDC_TIMER_4_BIT
+#elif (DUTY_RESOLUTION_BIT == 5) 
+    #define DUTY_RESOLUTION LEDC_TIMER_5_BIT
+#elif (DUTY_RESOLUTION_BIT == 6) 
+    #define DUTY_RESOLUTION LEDC_TIMER_6_BIT
+#elif (DUTY_RESOLUTION_BIT == 7) 
+    #define DUTY_RESOLUTION LEDC_TIMER_7_BIT
+#elif (DUTY_RESOLUTION_BIT == 8) 
+    #define DUTY_RESOLUTION LEDC_TIMER_8_BIT
+#elif (DUTY_RESOLUTION_BIT == 9) 
+    #define DUTY_RESOLUTION LEDC_TIMER_9_BIT
+#elif (DUTY_RESOLUTION_BIT == 10) 
+    #define DUTY_RESOLUTION LEDC_TIMER_10_BIT
+#elif (DUTY_RESOLUTION_BIT == 11) 
+    #define DUTY_RESOLUTION LEDC_TIMER_11_BIT
+#elif (DUTY_RESOLUTION_BIT == 12) 
+    #define DUTY_RESOLUTION LEDC_TIMER_12_BIT
+#elif (DUTY_RESOLUTION_BIT == 13) 
+    #define DUTY_RESOLUTION LEDC_TIMER_13_BIT
+#elif (DUTY_RESOLUTION_BIT == 14) 
+    #define DUTY_RESOLUTION LEDC_TIMER_14_BIT
+#elif (DUTY_RESOLUTION_BIT == 15) 
+    #define DUTY_RESOLUTION LEDC_TIMER_15_BIT
+#elif (DUTY_RESOLUTION_BIT == 16) 
+    #define DUTY_RESOLUTION LEDC_TIMER_16_BIT
+#elif (DUTY_RESOLUTION_BIT == 17) 
+    #define DUTY_RESOLUTION LEDC_TIMER_17_BIT
+#elif (DUTY_RESOLUTION_BIT == 18) 
+    #define DUTY_RESOLUTION LEDC_TIMER_18_BIT
+#elif (DUTY_RESOLUTION_BIT == 19) 
+    #define DUTY_RESOLUTION LEDC_TIMER_19_BIT
+#elif (DUTY_RESOLUTION_BIT == 20) 
+    #define DUTY_RESOLUTION LEDC_TIMER_20_BIT
 #endif
 
 void nvs_read_config();
@@ -43,24 +85,21 @@ char g_ip_addr[64] = DEFAULT_STATIC_IP_ADDR;
 char g_ssid[64] = DEFAULT_WIFI_STA_SSID;
 char g_pass[64] = DEFAULT_WIFI_STA_PASS;
 
-#define DEFAULT_DUTY_RESOLUTION LEDC_TIMER_8_BIT
 
-int bit = 8;
-
-signed int s = 0;
-float Kp = 0.01;
-float Ki = 0;
-float Kd = 0;
-float  min_freq = 50;
-signed int goal = 1200;
+signed int encoder_pos = 0;
+float kp = 0.01;
+float ki = 0;
+float kd = 0;
+float min_freq = 50;
+signed int goal_pos = 1200;
+int graph_count = 0;
+signed int time_arr[GRAPH_ARRAY_SIZE]; // Массив значений времени
+signed int encoder_pos_arr[GRAPH_ARRAY_SIZE]; // Массив значений позиции энкодера
 
 QueueHandle_t g_command_queue;
 
 bool g_flag_send_telemetry = false;
 
-volatile unsigned long g_step_fwd_period_us = DEFAULT_STEP_PERIOD_US;
-volatile unsigned long g_step_bwd_period_us = DEFAULT_STEP_PERIOD_US;
-volatile unsigned long g_steps = DEFAULT_STEPS;
 volatile unsigned long g_pause_ms = DEFAULT_PAUSE;
 volatile unsigned long g_calibration_timeout_ms = DEFAULT_CALIBRATION_TIMEOUT;
 
@@ -70,7 +109,22 @@ gptimer_handle_t g_gptimer;
 
 void append_telemetry_data(cJSON *json)
 {
-    cJSON_AddBoolToObject(json, STR_TELEMETRY, true);
+    cJSON_AddStringToObject(json, STR_TELEMETRY, "false");
+    //cJSON_AddNumberToObject(json, "graph_count", graph_count);
+    if (graph_count == GRAPH_ARRAY_SIZE)
+    {
+        int i = 0;
+        while (i < GRAPH_ARRAY_SIZE)
+        {
+            char str[10];
+            itoa(time_arr[i], str, 10);
+            cJSON_AddNumberToObject(json, str, encoder_pos_arr[i]);
+            time_arr[i] = 0;
+            encoder_pos_arr[i] = 0;
+            i++;
+        }
+        graph_count = 0;
+    }
 }
 
 char* build_telemetry_string()
@@ -91,16 +145,13 @@ char* build_config_string(bool for_nvs)
     cJSON_AddStringToObject(json, STR_IP_ADDR, g_ip_addr);
     cJSON_AddStringToObject(json, STR_SSID, g_ssid);
     cJSON_AddStringToObject(json, STR_PASS, g_pass);
-    cJSON_AddNumberToObject(json, STR_STEP_PERIOD_BWD, g_step_bwd_period_us);
-    cJSON_AddNumberToObject(json, STR_STEP_PERIOD_FWD, g_step_fwd_period_us);
-    cJSON_AddNumberToObject(json, STR_STEPS, g_steps);
     cJSON_AddNumberToObject(json, STR_PAUSE, g_pause_ms);
     cJSON_AddNumberToObject(json, STR_CALIBRATION_TIMEOUT, g_calibration_timeout_ms);
     cJSON_AddNumberToObject(json, STR_FLAG_SEND_TELEMETRY, g_flag_send_telemetry);
-    cJSON_AddNumberToObject(json, "goal", goal);
-    cJSON_AddNumberToObject(json, "Kp", Kp);
-    cJSON_AddNumberToObject(json, "Ki", Ki);
-    cJSON_AddNumberToObject(json, "Kd", Kd);
+    cJSON_AddNumberToObject(json, "goal_pos", goal_pos);
+    cJSON_AddNumberToObject(json, "kp", kp);
+    cJSON_AddNumberToObject(json, "ki", ki);
+    cJSON_AddNumberToObject(json, "kd", kd);
     cJSON_AddNumberToObject(json, "min_freq", min_freq);
 
     if (!for_nvs)
@@ -145,16 +196,29 @@ void parse_config_string(const char *str)
             if (!strcmp(param_name, STR_IP_ADDR)) strncpy(g_ip_addr, subitem->valuestring, sizeof(g_ip_addr)-1);
             if (!strcmp(param_name, STR_SSID)) strncpy(g_ssid, subitem->valuestring, sizeof(g_ssid)-1);
             if (!strcmp(param_name, STR_PASS)) strncpy(g_pass, subitem->valuestring, sizeof(g_pass)-1);
-            if (!strcmp(param_name, STR_STEPS)) g_steps = subitem->valueint;
-            if (!strcmp(param_name, STR_STEP_PERIOD_BWD)) g_step_bwd_period_us = subitem->valueint;
-            if (!strcmp(param_name, STR_STEP_PERIOD_FWD)) g_step_fwd_period_us = subitem->valueint;
             if (!strcmp(param_name, STR_PAUSE)) g_pause_ms = subitem->valueint;
             if (!strcmp(param_name, STR_CALIBRATION_TIMEOUT)) g_calibration_timeout_ms = subitem->valueint;
             if (!strcmp(param_name, STR_FLAG_SEND_TELEMETRY)) g_flag_send_telemetry = subitem->valueint;
-            if (!strcmp(param_name, "goal")) goal = subitem->valueint;
-            if (!strcmp(param_name, "Kp")) Kp = subitem->valuedouble;
-            if (!strcmp(param_name, "Ki")) Ki = subitem->valuedouble;
-            if (!strcmp(param_name, "Kd")) Kd = subitem->valuedouble;
+            if (!strcmp(param_name, "goal_pos"))
+            {
+                if (graph_count != subitem->valueint)
+                {
+                    int i = 0;
+                    while (i < GRAPH_ARRAY_SIZE)
+                    {
+                        char str[10];
+                        itoa(time_arr[i], str, 10);
+                        time_arr[i] = 0;
+                        encoder_pos_arr[i] = 0;
+                        i++;
+                    }
+                    graph_count = 0;
+                }
+                goal_pos = subitem->valueint;
+            } 
+            if (!strcmp(param_name, "Kp")) kp = subitem->valuedouble;
+            if (!strcmp(param_name, "Ki")) ki = subitem->valuedouble;
+            if (!strcmp(param_name, "Kd")) kd = subitem->valuedouble;
             if (!strcmp(param_name, "min_freq")) min_freq = subitem->valueint;
 
             if (!strcmp(param_name, STR_CMD_READ_FLASH) && subitem->valueint) nvs_read_config();
@@ -196,7 +260,7 @@ void command_processing_task(void *pvParameters)
             char *telemetry_to_send = build_telemetry_string();            
             if (telemetry_to_send)
             {
-                ESP_LOGI(TAG, "Will send telemetry %s", telemetry_to_send);
+                //ESP_LOGI(TAG, "Will send telemetry %s", telemetry_to_send);
                 int err = sendto(cmd.sock, telemetry_to_send, strlen(telemetry_to_send), 0, (struct sockaddr *)&cmd.source_addr, sizeof(struct sockaddr));
                 if (err < 0) 
                 {
@@ -209,32 +273,15 @@ void command_processing_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-static void IRAM_ATTR do_step(bool dir, uint32_t n_steps, long step_period, bool flag_wait)
-{
-    ledc_timer_config_t ledc_timer1 = {
-        .speed_mode       = LEDC_LOW_SPEED_MODE,
-        .duty_resolution  = DEFAULT_DUTY_RESOLUTION ,
-        .timer_num        = LEDC_TIMER_0,
-        .freq_hz          = step_period,  // Set output frequency according to g_step_period_us
-        .clk_cfg          = LEDC_AUTO_CLK
-    };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer1));
-
-    gpio_set_level(PIN_DIR, dir);
-    
-    //ledc_set_fade(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 1, LEDC_DUTY_DIR_DECREASE, 1, n_steps, 1);
-    //ledc_fade_start(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, flag_wait ? LEDC_FADE_WAIT_DONE : LEDC_FADE_NO_WAIT);
-}
-
 static void IRAM_ATTR funA(void *param)
 {
     int a = gpio_get_level(PIN_A);
     int b = gpio_get_level(PIN_B);
 
-    if (a == 1 && b == 1) s-=1;
-    if (a == 1 && b == 0) s+=1;
-    if (a == 0 && b == 1) s+=1;
-    if (a == 0 && b == 0) s-=1;
+    if (a == 1 && b == 1) encoder_pos-=1;
+    if (a == 1 && b == 0) encoder_pos+=1;
+    if (a == 0 && b == 1) encoder_pos+=1;
+    if (a == 0 && b == 0) encoder_pos-=1;
 }
 
 static void IRAM_ATTR funB(void *param)
@@ -242,10 +289,10 @@ static void IRAM_ATTR funB(void *param)
     int a = gpio_get_level(PIN_A);
     int b = gpio_get_level(PIN_B);
 
-    if (b == 1 && a == 1) s+=1;
-    if (b == 1 && a == 0) s-=1;
-    if (b == 0 && a == 1) s-=1;
-    if (b == 0 && a == 0) s+=1;
+    if (b == 1 && a == 1) encoder_pos+=1;
+    if (b == 1 && a == 0) encoder_pos-=1;
+    if (b == 0 && a == 1) encoder_pos-=1;
+    if (b == 0 && a == 0) encoder_pos+=1;
 }
 
 void IRAM_ATTR sense_stop_isr(void *arg)
@@ -409,20 +456,10 @@ void calibrate_stepper()
 int step_max = 100;
 long step_acc = 0;
 int step;
-
-float r = 1;
-int dir = 1;
-float u = 0;
-float r_prev = 0;
-float r_prev_prev = 0;
-float u_prev = 0;
-//float dt = g_step_fwd_period_us; //us
-bool flag = 0;
-
+static int log_count = 0;
 static float u_integral = 0;     
-static float u_prev_error = 0;   
-static bool g_pid_enabled = true;   
-static  bool timer_paused = false; 
+static float u_prev_error = 0;     
+static bool timer_paused = false; 
 
 
 void app_main(void)
@@ -445,9 +482,6 @@ void app_main(void)
     eth_start(config);
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    float u = 0;           // Управляющий сигнал
-    float r = 0;           // Ошибка
-    int dir = 1;           // Направление
 
     g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
     assert(g_command_queue != NULL);
@@ -460,7 +494,7 @@ void app_main(void)
     
     ledc_timer_config_t ledc_timer1 = {
         .speed_mode       = LEDC_LOW_SPEED_MODE,
-        .duty_resolution  = DEFAULT_DUTY_RESOLUTION,
+        .duty_resolution  = DUTY_RESOLUTION,
         .timer_num        = LEDC_TIMER_0,
         .freq_hz          = min_freq,
         .clk_cfg          = LEDC_AUTO_CLK
@@ -473,54 +507,51 @@ void app_main(void)
         .timer_sel      = LEDC_TIMER_0,
         .intr_type      = LEDC_INTR_DISABLE,
         .gpio_num       = PIN_STEP,
-        .duty           = (int)(pow(2, bit - 1)),
+        .duty           = (int)(pow(2, DUTY_RESOLUTION_BIT - 1)),
         .hpoint         = 0
     };
     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel1));
 
     ESP_LOGI(TAG, "PID control task started");
 
-    
+    float u = 0;           // Управляющий сигнал
+    float u_max = 2000;    // 
+    signed int r = 0;      // Невязка
+    int dir = 1;           // Направление
+
     while (1)
     {
-        signed int r = goal - s; 
-
-        if (abs(r) > 2 && !g_pid_enabled)
-        {
-            ESP_LOGI(TAG, "Auto-return: was at target, now error=%d, restarting PID", abs(r));
-            g_pid_enabled = true;
-            //timer_paused = false;  
-        }
-
+        signed int r = goal_pos - encoder_pos; 
         //ESP_LOGI(TAG, "s=%i, goal=%i, r=%f", s, goal, r);
-        if (g_pid_enabled && abs(r) > 2) 
+
+        if (abs(r) > 2) 
         {      
             if (timer_paused) 
             {
-                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, bit - 1)));  
+                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, DUTY_RESOLUTION_BIT - 1)));  
                 ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
                 timer_paused = false;
                 ESP_LOGI(TAG, "Timer resumed");
             }
 
-            float p_term = Kp * r;
-            
+            float p_term = kp * r;
             
             u_integral += r;
-            if (u_integral > 1000) u_integral = 1000;
-            if (u_integral < -1000) u_integral = -1000;
-            float i_term = Ki * u_integral;
+            //if (u_integral > 1000) u_integral = 1000;
+            //if (u_integral < -1000) u_integral = -1000;
+            u_integral = (u_integral > 1000) ? 1000 : (u_integral < -1000) ? -1000 : u_integral;
+            float i_term = ki * u_integral;
             
            
-            float d_term = Kd * (r - u_prev_error);
+            float d_term = kd * (r - u_prev_error);
             u_prev_error = r;
             
            
             u = p_term + i_term + d_term;
             
-            int u_max = 2000;
-            if (u > u_max) u = u_max;
-            if (u < -u_max) u = -u_max;
+            //if (u > u_max) u = u_max;
+            //if (u < -u_max) u = -u_max;
+            u = (u > u_max) ? u_max : (u < -u_max) ? -u_max : u;
 
            
             dir = (u >= 0) ? 1 : 0;
@@ -529,28 +560,29 @@ void app_main(void)
 
             gpio_set_level(PIN_DIR, dir);
             
-           
-            ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, (uint32_t)frequency);
+            ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, (int)frequency);
             ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
         }
-        else
+        else if (!timer_paused) 
         {
-            // Остановка ШИМ при достижении цели или выключении ПИД
-            if (!timer_paused && abs(r) <= 2) {
-                // Устанавливаем скважность 0% - нет импульсов, но таймер работает
-                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-                ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-                timer_paused = true;
-                g_pid_enabled = false;
-                ESP_LOGI(TAG, "Timer paused (duty=0)");
-            }
-            
+            // Устанавливаем скважность 0% - нет импульсов, но таймер работает
+            ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
+            ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+            timer_paused = true;
+            ESP_LOGI(TAG, "Timer paused (duty=0)");
         }
 
-        static int log_count = 0;
-        if (log_count++ % 50 == 0) 
+        if (log_count++ == 50) 
         {
-            ESP_LOGI(TAG, "s=%i, goal=%i, err=%d\n", s, goal, r);
+            ESP_LOGI(TAG, "s=%i, goal=%i, err=%d\n", encoder_pos, goal_pos, r);
+            log_count = 0;
+        }
+        if (graph_count < GRAPH_ARRAY_SIZE)
+        {
+            graph_count++;
+            time_arr[graph_count - 1] = graph_count;
+            encoder_pos_arr[graph_count - 1] = r;
+            ESP_LOGI(TAG, "graph");
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
