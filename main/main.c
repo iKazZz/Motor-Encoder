@@ -43,7 +43,8 @@ char g_ip_addr[64] = DEFAULT_STATIC_IP_ADDR;
 char g_ssid[64] = DEFAULT_WIFI_STA_SSID;
 char g_pass[64] = DEFAULT_WIFI_STA_PASS;
 
-#define DEFAULT_DUTY_RESOLUTION LEDC_TIMER_2_BIT
+int bit = 8;
+#define DEFAULT_DUTY_RESOLUTION LEDC_TIMER_8_BIT
 
 int s = 0;
 int pp = 1200;
@@ -513,7 +514,7 @@ void app_main(void)
          .timer_sel      = LEDC_TIMER_0,
          .intr_type      = LEDC_INTR_DISABLE,
          .gpio_num       = PIN_STEP,
-         .duty           = (int)(pow(2,1)),
+         .duty           = (int)(pow(2,bit - 1)),
          .hpoint         = 0
      };
      ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel1));
@@ -540,7 +541,7 @@ void app_main(void)
         {
             
             if (timer_paused) {
-                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2,1)));  
+                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2,bit - 1)));  
                 ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
                 timer_paused = false;
                 ESP_LOGI(TAG, "Timer resumed");
@@ -562,8 +563,8 @@ void app_main(void)
             u = p_term + i_term + d_term;
             
             
-            if (u > 5000) u = 5000;
-            if (u < -5000) u = -5000;
+            if (u > 3999) u = 3999;
+            if (u < -3999) u = -3999;
 
            
             dir = (u >= 0) ? 1 : 0;
