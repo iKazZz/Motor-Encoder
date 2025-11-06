@@ -87,7 +87,7 @@ char g_pass[64] = DEFAULT_WIFI_STA_PASS;
 
 
 signed int encoder_pos = 0;
-float kp = 0.01;
+float kp = 1;
 float ki = 0;
 float kd = 0;
 float min_freq = 50;
@@ -216,9 +216,9 @@ void parse_config_string(const char *str)
                 }
                 goal_pos = subitem->valueint;
             } 
-            if (!strcmp(param_name, "Kp")) kp = subitem->valuedouble;
-            if (!strcmp(param_name, "Ki")) ki = subitem->valuedouble;
-            if (!strcmp(param_name, "Kd")) kd = subitem->valuedouble;
+            if (!strcmp(param_name, "kp")) kp = subitem->valuedouble;
+            if (!strcmp(param_name, "ki")) ki = subitem->valuedouble;
+            if (!strcmp(param_name, "kd")) kd = subitem->valuedouble;
             if (!strcmp(param_name, "min_freq")) min_freq = subitem->valueint;
 
             if (!strcmp(param_name, STR_CMD_READ_FLASH) && subitem->valueint) nvs_read_config();
@@ -515,7 +515,7 @@ void app_main(void)
     ESP_LOGI(TAG, "PID control task started");
 
     float u = 0;           // Управляющий сигнал
-    float u_max = 2000;    // 
+    float u_max = 5000;    // 
     signed int r = 0;      // Невязка
     int dir = 1;           // Направление
 
