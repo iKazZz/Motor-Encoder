@@ -445,9 +445,9 @@ void app_main(void)
     eth_start(config);
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    float u = 0;           // Управляющий сигнал
-    float r = 0;           // Ошибка
-    int dir = 1;           // Направление
+    float u = 0;           
+    float r = 0;           
+    int dir = 1;           
 
     g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
     assert(g_command_queue != NULL);
@@ -535,9 +535,8 @@ void app_main(void)
         }
         else
         {
-            // Остановка ШИМ при достижении цели или выключении ПИД
             if (!timer_paused && abs(r) <= 2) {
-                // Устанавливаем скважность 0% - нет импульсов, но таймер работает
+                
                 ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
                 ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
                 timer_paused = true;
