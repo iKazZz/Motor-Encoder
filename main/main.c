@@ -16,18 +16,19 @@
 #define PIN_NUM_SS      5
 
 
-esp_err_t data(spi_device_handle_t spi, const uint8_t *data, int len)
+esp_err_t data(spi_device_handle_t spi, uint8_t *data, int len)
 {
     esp_err_t ret;
     spi_transaction_t t;
+    memset(&t, 0, sizeof(t));
     t.flags = 0;
     t.cmd = 0x01;
     t.addr = 0;
     t.length = len * 8;
-    t.tx_buffer = data;
+    t.tx_buffer = 0;
+    t.rxlength = t.length;
     t.rx_buffer = data;
-    t.user = (void*)1;
-    memset(&t, 0, sizeof(t));
+    t.user = 0;
     ret = spi_device_polling_transmit(spi, &t);
     //assert(ret == ESP_OK);
     return ret;
@@ -37,15 +38,16 @@ void app_main(void)
 {
     esp_err_t ret;
     spi_device_handle_t spi;
-spi_bus_config_t buscfg = {
+    spi_bus_config_t buscfg = {
     .miso_io_num = PIN_NUM_MISO,
     .mosi_io_num = PIN_NUM_MOSI,
     .sclk_io_num = PIN_NUM_CLK,
     .quadhd_io_num = -1,
     .quadwp_io_num = -1,
-    .max_transfer_sz = 64
-};
-spi_device_interface_config_t devcfg = {
+    .max_transfer_sz = 1
+    };
+
+    spi_device_interface_config_t devcfg = {
     #ifdef CONFIG_OVERCLOCK
     .clock_speed_hz = 26 * 1000 * 1000,
     #else
@@ -64,21 +66,20 @@ spi_device_interface_config_t devcfg = {
     ret = spi_bus_add_device(HOST, &devcfg, &spi);
     ESP_ERROR_CHECK(ret);
 
-        while(1)
+    while(1)
     {
-        uint8_t test_buf[8];
-        ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", test_buf[0],test_buf[1],test_buf[2],test_buf[3],test_buf[4],test_buf[5],test_buf[6],test_buf[7]);
+        uint8_t test_buf[8] = "00000000";
+        //ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", test_buf[0],test_buf[1],test_buf[2],test_buf[3],test_buf[4],test_buf[5],test_buf[6],test_buf[7]);
 
-
-        //ret = data(spi, test_buf, sizeof(test_buf));
+        ret = data(spi, test_buf, sizeof(test_buf));
         
         if (ret == ESP_OK) {
-            // ESP_LOGI("MOSI", "%s", test_buf);
-            
             ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", test_buf[0],test_buf[1],test_buf[2],test_buf[3],test_buf[4],test_buf[5],test_buf[6],test_buf[7]);
+            ESP_LOGI("flag, pos, time", "%i %i %i", test_buf[0] / 128, test_buf[1] * pow(2, 16) + test_buf[2] * pow(2, 8) + test_buf[3], test_buf[4] * pow(2, 24) + test_buf[5] * pow(2, 16) + test_buf[6] * pow(2, 8) + test_buf[7]);
+
         }
         
-        vTaskDelay(pdMS_TO_TICKS(1000));  
+        vTaskDelay(pdMS_TO_TICKS(50));  
     }
 
     /*while(1)
