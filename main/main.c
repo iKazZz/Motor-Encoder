@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include <sys/param.h>
 #include "sdkconfig.h"
+#include <math.h>
 
 #define HOST            SPI3_HOST
 #define PIN_NUM_MISO    19
@@ -75,11 +76,13 @@ void app_main(void)
         
         if (ret == ESP_OK) {
             ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", test_buf[0],test_buf[1],test_buf[2],test_buf[3],test_buf[4],test_buf[5],test_buf[6],test_buf[7]);
-            ESP_LOGI("flag, pos, time", "%i %i %i", test_buf[0] / 128, test_buf[1] * pow(2, 16) + test_buf[2] * pow(2, 8) + test_buf[3], test_buf[4] * pow(2, 24) + test_buf[5] * pow(2, 16) + test_buf[6] * pow(2, 8) + test_buf[7]);
+            int pos = test_buf[1] * pow(2, 16) + test_buf[2] * pow(2, 8) + test_buf[3];
+            long long timecode = (long long)test_buf[4] * (long long)pow(2, 8) * (long long)pow(2, 8) * (long long)pow(2, 8) + test_buf[5] * pow(2, 8) * pow(2, 8) + test_buf[6] * pow(2, 8) + test_buf[7];
+            ESP_LOGI("flag, pos, angle, time", "%i %i %i %i", test_buf[0] / 128, (pos - 1048576) / 4, ((pos - 1048576) / 4) * 360 / 2048, timecode * 20 / 1000000000);
 
         }
         
-        vTaskDelay(pdMS_TO_TICKS(50));  
+        vTaskDelay(pdMS_TO_TICKS(200));  
     }
 
     /*while(1)
