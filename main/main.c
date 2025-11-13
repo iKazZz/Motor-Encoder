@@ -24,6 +24,10 @@
 #include "servosila_sc.h"
 #include <cJSON.h>
 #include <math.h>
+#include "driver/spi_master.h"
+#include <unistd.h>
+#include <sys/param.h>
+#include <math.h>
 
 #ifndef max
 #define max(a,b)            (((a) > (b)) ? (a) : (b))
@@ -32,6 +36,7 @@
 #ifndef min
 #define min(a,b)            (((a) < (b)) ? (a) : (b))
 #endif
+
 
 void nvs_read_config();
 void nvs_write_config();
@@ -57,15 +62,30 @@ QueueHandle_t g_command_queue;
 
 bool g_flag_send_telemetry = true;
 
-volatile unsigned long g_step_fwd_period_us = DEFAULT_STEP_PERIOD_US;
-volatile unsigned long g_step_bwd_period_us = DEFAULT_STEP_PERIOD_US;
-volatile unsigned long g_steps = DEFAULT_STEPS;
 volatile unsigned long g_pause_ms = DEFAULT_PAUSE;
 volatile unsigned long g_calibration_timeout_ms = DEFAULT_CALIBRATION_TIMEOUT;
 
 struct sockaddr_storage g_last_cmd_source_addr; // TODO: mutex protect
 
 gptimer_handle_t g_gptimer;
+
+esp_err_t data(spi_device_handle_t spi, uint8_t *data, int len)
+{
+    esp_err_t ret;
+    spi_transaction_t t;
+    memset(&t, 0, sizeof(t));
+    t.flags = 0;
+    t.cmd = 0x01;
+    t.addr = 0;
+    t.length = len * 8;
+    t.tx_buffer = 0;
+    t.rxlength = t.length;
+    t.rx_buffer = data;
+    t.user = 0;
+    ret = spi_device_polling_transmit(spi, &t);
+    //assert(ret == ESP_OK);
+    return ret;
+}
 
 void append_telemetry_data(cJSON *json)
 {
@@ -444,24 +464,24 @@ void calibrate_stepper()
 }
 
 
-    int step_max = 100;
-    long step_acc = 0;
-    int goal = 1200;
-    int step;
+int step_max = 100;
+long step_acc = 0;
+int goal = 1200;
+int step;
 
-    float r = 1;
-    int dir = 1;
-    float u = 0;
-    float r_prev = 0;
-    float r_prev_prev = 0;
-    float u_prev = 0;
-    //float dt = g_step_fwd_period_us; //us
-    bool flag = 0;
+float r = 1;
+int dir = 1;
+float u = 0;
+float r_prev = 0;
+float r_prev_prev = 0;
+float u_prev = 0;
+//float dt = g_step_fwd_period_us; //us
+bool flag = 0;
 
-    static float u_integral = 0;     
-    static float u_prev_error = 0;   
-    static bool g_pid_enabled = true;   
-    static  bool timer_paused = false; 
+static float u_integral = 0;     
+static float u_prev_error = 0;   
+static bool g_pid_enabled = true;   
+static  bool timer_paused = false; 
 
 
 void app_main(void)
