@@ -76,10 +76,9 @@ void app_main(void)
         
         if (ret == ESP_OK) {
             ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", test_buf[0],test_buf[1],test_buf[2],test_buf[3],test_buf[4],test_buf[5],test_buf[6],test_buf[7]);
-            int pos = test_buf[1] * pow(2, 16) + test_buf[2] * pow(2, 8) + test_buf[3];
-            long long timecode = (long long)test_buf[4] * (long long)pow(2, 8) * (long long)pow(2, 8) * (long long)pow(2, 8) + test_buf[5] * pow(2, 8) * pow(2, 8) + test_buf[6] * pow(2, 8) + test_buf[7];
-            ESP_LOGI("flag, pos, angle, time", "%i %i %i %i", test_buf[0] / 128, (pos - 1048576) / 4, ((pos - 1048576) / 4) * 360 / 2048, timecode * 20 / 1000000000);
-
+            int32_t pos = ((uint32_t)test_buf[1] << 16) + ((uint32_t)test_buf[2] << 8) + (uint32_t)test_buf[3];
+            uint32_t timecode = ((uint32_t)test_buf[4] << 24) + ((uint32_t)test_buf[5] << 16) + ((uint32_t)test_buf[6] << 8) + (uint32_t)test_buf[7];
+            ESP_LOGI("flag, pos, angle, time", "%i %i %.2f %.2f", test_buf[0] / 128, (pos - 1048576) / 4, (((float)pos - 1048576) / 4) * 360 / 2048, (double)timecode * 20 / 1000000000 );
         }
         
         vTaskDelay(pdMS_TO_TICKS(200));  
