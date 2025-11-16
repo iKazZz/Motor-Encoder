@@ -30,17 +30,16 @@
 #include <math.h>
 
 #ifndef max
-#define max(a,b)            (((a) > (b)) ? (a) : (b))
+#define max(a, b) (((a) > (b)) ? (a) : (b))
 #endif
 
 #ifndef min
-#define min(a,b)            (((a) < (b)) ? (a) : (b))
+#define min(a, b) (((a) < (b)) ? (a) : (b))
 #endif
-
 
 void nvs_read_config();
 void nvs_write_config();
-char* build_config_string(bool for_nvs);
+char *build_config_string(bool for_nvs);
 
 static const char *TAG = "step_controller";
 
@@ -48,15 +47,17 @@ char g_ip_addr[64] = DEFAULT_STATIC_IP_ADDR;
 char g_ssid[64] = DEFAULT_WIFI_STA_SSID;
 char g_pass[64] = DEFAULT_WIFI_STA_PASS;
 
-int bit = 8;
-#define DEFAULT_DUTY_RESOLUTION LEDC_TIMER_8_BIT
+int bit = 4;
+#define DEFAULT_DUTY_RESOLUTION LEDC_TIMER_4_BIT
 
-int s = 0;
-int pp = 1200;
+int32_t s = 0;
+double t = 0;
+int pp = 4096;
+int goal = 4096;
 float Kp = 0.01;
 float Ki = 0;
 float Kd = 0;
-float  min_freq = 35;
+float min_freq = 500;
 
 QueueHandle_t g_command_queue;
 
@@ -83,45 +84,43 @@ esp_err_t data(spi_device_handle_t spi, uint8_t *data, int len)
     t.rx_buffer = data;
     t.user = 0;
     ret = spi_device_polling_transmit(spi, &t);
-    //assert(ret == ESP_OK);
+    // assert(ret == ESP_OK);
     return ret;
 }
 
 void append_telemetry_data(cJSON *json)
 {
     cJSON_AddBoolToObject(json, STR_TELEMETRY, true);
-    cJSON_AddNumberToObject(json, "s", s);           // Текущее положение мотора
-    cJSON_AddNumberToObject(json, "goal", pp);       // Целевая позиция      
-    cJSON_AddNumberToObject(json, "Kp", Kp);         // Коэффициенты ПИД
+    cJSON_AddNumberToObject(json, "s", s);
+    cJSON_AddNumberToObject(json, "t", t);       // Текущее положение мотора
+    cJSON_AddNumberToObject(json, "goal", goal); // Целевая позиция
+    cJSON_AddNumberToObject(json, "Kp", Kp);     // Коэффициенты ПИД
     cJSON_AddNumberToObject(json, "Ki", Ki);
     cJSON_AddNumberToObject(json, "Kd", Kd);
 }
 
-char* build_telemetry_string()
+char *build_telemetry_string()
 {
     cJSON *json = cJSON_CreateObject();
 
     append_telemetry_data(json);
 
-    char* str = cJSON_Print(json);
+    char *str = cJSON_Print(json);
     cJSON_Delete(json);
     return str;
 }
 
-char* build_config_string(bool for_nvs)
+char *build_config_string(bool for_nvs)
 {
     cJSON *json = cJSON_CreateObject();
 
     cJSON_AddStringToObject(json, STR_IP_ADDR, g_ip_addr);
     cJSON_AddStringToObject(json, STR_SSID, g_ssid);
     cJSON_AddStringToObject(json, STR_PASS, g_pass);
-    cJSON_AddNumberToObject(json, STR_STEP_PERIOD_BWD, g_step_bwd_period_us);
-    cJSON_AddNumberToObject(json, STR_STEP_PERIOD_FWD, g_step_fwd_period_us);
-    cJSON_AddNumberToObject(json, STR_STEPS, g_steps);
     cJSON_AddNumberToObject(json, STR_PAUSE, g_pause_ms);
     cJSON_AddNumberToObject(json, STR_CALIBRATION_TIMEOUT, g_calibration_timeout_ms);
     cJSON_AddNumberToObject(json, STR_FLAG_SEND_TELEMETRY, g_flag_send_telemetry);
-    cJSON_AddNumberToObject(json, "goal", pp);
+    cJSON_AddNumberToObject(json, "goal", goal);
     cJSON_AddNumberToObject(json, "Kp", Kp);
     cJSON_AddNumberToObject(json, "Ki", Ki);
     cJSON_AddNumberToObject(json, "Kd", Kd);
@@ -131,7 +130,7 @@ char* build_config_string(bool for_nvs)
     {
     }
 
-    char* str = cJSON_Print(json);
+    char *str = cJSON_Print(json);
     cJSON_Delete(json);
     return str;
 }
@@ -150,49 +149,63 @@ void parse_config_string(const char *str)
         {
             cJSON *type = cJSON_GetObjectItem(parsed_cmd, "type");
             char *type_str = cJSON_GetStringValue(type);
-            if (!type_str) ESP_LOGE(TAG, "Invalid type field");
-            else 
+            if (!type_str)
+                ESP_LOGE(TAG, "Invalid type field");
+            else
             {
                 ESP_LOGI(TAG, "Type field: %s", type_str);
-                if (!strcmp(type_str, "cmd")) flag_got_command = true;
+                if (!strcmp(type_str, "cmd"))
+                    flag_got_command = true;
             }
         }
-        
-        for (int i=0; i < cJSON_GetArraySize(parsed_cmd); i++)
-        {   
+
+        for (int i = 0; i < cJSON_GetArraySize(parsed_cmd); i++)
+        {
             cJSON *subitem = cJSON_GetArrayItem(parsed_cmd, i);
 
             ESP_LOGI(TAG, "Item %s", subitem->string);
-            
+
             char *param_name = subitem->string;
 
-            if (!strcmp(param_name, STR_IP_ADDR)) strncpy(g_ip_addr, subitem->valuestring, sizeof(g_ip_addr)-1);
-            if (!strcmp(param_name, STR_SSID)) strncpy(g_ssid, subitem->valuestring, sizeof(g_ssid)-1);
-            if (!strcmp(param_name, STR_PASS)) strncpy(g_pass, subitem->valuestring, sizeof(g_pass)-1);
-            if (!strcmp(param_name, STR_STEPS)) g_steps = subitem->valueint;
-            if (!strcmp(param_name, STR_STEP_PERIOD_BWD)) g_step_bwd_period_us = subitem->valueint;
-            if (!strcmp(param_name, STR_STEP_PERIOD_FWD)) g_step_fwd_period_us = subitem->valueint;
-            if (!strcmp(param_name, STR_PAUSE)) g_pause_ms = subitem->valueint;
-            if (!strcmp(param_name, STR_CALIBRATION_TIMEOUT)) g_calibration_timeout_ms = subitem->valueint;
-            if (!strcmp(param_name, STR_FLAG_SEND_TELEMETRY)) g_flag_send_telemetry = subitem->valueint;
-            if (!strcmp(param_name, "pp")) pp = subitem->valueint;
-            if (!strcmp(param_name, "Kp")) Kp = subitem->valuedouble;
-            if (!strcmp(param_name, "Ki")) Ki = subitem->valuedouble;
-            if (!strcmp(param_name, "Kd")) Kd = subitem->valuedouble;
-            if (!strcmp(param_name, "min_freq")) min_freq = subitem->valueint;
+            if (!strcmp(param_name, STR_IP_ADDR))
+                strncpy(g_ip_addr, subitem->valuestring, sizeof(g_ip_addr) - 1);
+            if (!strcmp(param_name, STR_SSID))
+                strncpy(g_ssid, subitem->valuestring, sizeof(g_ssid) - 1);
+            if (!strcmp(param_name, STR_PASS))
+                strncpy(g_pass, subitem->valuestring, sizeof(g_pass) - 1);
+            if (!strcmp(param_name, STR_PAUSE))
+                g_pause_ms = subitem->valueint;
+            if (!strcmp(param_name, STR_CALIBRATION_TIMEOUT))
+                g_calibration_timeout_ms = subitem->valueint;
+            if (!strcmp(param_name, STR_FLAG_SEND_TELEMETRY))
+                g_flag_send_telemetry = subitem->valueint;
+            // if (!strcmp(param_name, "pp")) pp = subitem->valueint;
+            if (!strcmp(param_name, "goal"))
+                goal = subitem->valueint;
+            if (!strcmp(param_name, "Kp"))
+                Kp = subitem->valuedouble;
+            if (!strcmp(param_name, "Ki"))
+                Ki = subitem->valuedouble;
+            if (!strcmp(param_name, "Kd"))
+                Kd = subitem->valuedouble;
+            if (!strcmp(param_name, "min_freq"))
+                min_freq = subitem->valueint;
 
-            if (!strcmp(param_name, STR_CMD_READ_FLASH) && subitem->valueint) nvs_read_config();
-            if (!strcmp(param_name, STR_CMD_WRITE_FLASH) && subitem->valueint) nvs_write_config();
+            if (!strcmp(param_name, STR_CMD_READ_FLASH) && subitem->valueint)
+                nvs_read_config();
+            if (!strcmp(param_name, STR_CMD_WRITE_FLASH) && subitem->valueint)
+                nvs_write_config();
 
-            if (!strcmp(param_name, "start_plot")) {
-            g_flag_send_telemetry = true;
-            ESP_LOGI(TAG, "Plot streaming started");
+            if (!strcmp(param_name, "start_plot"))
+            {
+                g_flag_send_telemetry = true;
+                ESP_LOGI(TAG, "Plot streaming started");
             }
-            if (!strcmp(param_name, "stop_plot")) {
-            g_flag_send_telemetry = false;
-            ESP_LOGI(TAG, "Plot streaming stopped");
+            if (!strcmp(param_name, "stop_plot"))
+            {
+                g_flag_send_telemetry = false;
+                ESP_LOGI(TAG, "Plot streaming stopped");
             }
-            
         }
     }
 
@@ -211,28 +224,28 @@ void command_processing_task(void *pvParameters)
         }
         else
         {
-            ESP_LOGI(TAG, "Got command %s", cmd.cmd);            
+            ESP_LOGI(TAG, "Got command %s", cmd.cmd);
             g_last_cmd_source_addr = cmd.source_addr;
             parse_config_string(cmd.cmd);
-            
-            char *config_to_send = build_config_string(false);            
+
+            char *config_to_send = build_config_string(false);
             if (config_to_send)
             {
                 ESP_LOGI(TAG, "Will send config %s", config_to_send);
                 int err = sendto(cmd.sock, config_to_send, strlen(config_to_send), 0, (struct sockaddr *)&cmd.source_addr, sizeof(struct sockaddr));
-                if (err < 0) 
+                if (err < 0)
                 {
                     ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
                 }
             }
             free(config_to_send);
 
-            char *telemetry_to_send = build_telemetry_string();            
+            char *telemetry_to_send = build_telemetry_string();
             if (telemetry_to_send)
             {
                 ESP_LOGI(TAG, "Will send telemetry %s", telemetry_to_send);
                 int err = sendto(cmd.sock, telemetry_to_send, strlen(telemetry_to_send), 0, (struct sockaddr *)&cmd.source_addr, sizeof(struct sockaddr));
-                if (err < 0) 
+                if (err < 0)
                 {
                     ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
                 }
@@ -246,18 +259,17 @@ void command_processing_task(void *pvParameters)
 static void IRAM_ATTR do_step(bool dir, uint32_t n_steps, long step_period, bool flag_wait)
 {
     ledc_timer_config_t ledc_timer1 = {
-        .speed_mode       = LEDC_LOW_SPEED_MODE,
-        .duty_resolution  = DEFAULT_DUTY_RESOLUTION ,
-        .timer_num        = LEDC_TIMER_0,
-        .freq_hz          = step_period,  // Set output frequency according to g_step_period_us
-        .clk_cfg          = LEDC_AUTO_CLK
-    };
+        .speed_mode = LEDC_HIGH_SPEED_MODE,
+        .duty_resolution = DEFAULT_DUTY_RESOLUTION,
+        .timer_num = LEDC_TIMER_0,
+        .freq_hz = step_period, // Set output frequency according to g_step_period_us
+        .clk_cfg = LEDC_AUTO_CLK};
     ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer1));
 
     gpio_set_level(PIN_DIR, dir);
-    
-    //ledc_set_fade(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 1, LEDC_DUTY_DIR_DECREASE, 1, n_steps, 1);
-    //ledc_fade_start(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, flag_wait ? LEDC_FADE_WAIT_DONE : LEDC_FADE_NO_WAIT);
+
+    // ledc_set_fade(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 1, LEDC_DUTY_DIR_DECREASE, 1, n_steps, 1);
+    // ledc_fade_start(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, flag_wait ? LEDC_FADE_WAIT_DONE : LEDC_FADE_NO_WAIT);
 }
 
 /*static void IRAM_ATTR funA(void *param)
@@ -288,10 +300,14 @@ static void IRAM_ATTR funA(void *param)
     int a = gpio_get_level(PIN_A);
     int b = gpio_get_level(PIN_B);
 
-    if (a == 1 && b == 1) s-=1;
-    if (a == 1 && b == 0) s+=1;
-    if (a == 0 && b == 1) s+=1;
-    if (a == 0 && b == 0) s-=1;
+    if (a == 1 && b == 1)
+        s -= 1;
+    if (a == 1 && b == 0)
+        s += 1;
+    if (a == 0 && b == 1)
+        s += 1;
+    if (a == 0 && b == 0)
+        s -= 1;
 }
 
 static void IRAM_ATTR funB(void *param)
@@ -299,10 +315,14 @@ static void IRAM_ATTR funB(void *param)
     int a = gpio_get_level(PIN_A);
     int b = gpio_get_level(PIN_B);
 
-    if (b == 1 && a == 1) s+=1;
-    if (b == 1 && a == 0) s-=1;
-    if (b == 0 && a == 1) s-=1;
-    if (b == 0 && a == 0) s+=1;
+    if (b == 1 && a == 1)
+        s += 1;
+    if (b == 1 && a == 0)
+        s -= 1;
+    if (b == 0 && a == 1)
+        s -= 1;
+    if (b == 0 && a == 0)
+        s += 1;
 }
 
 void IRAM_ATTR sense_stop_isr(void *arg)
@@ -340,11 +360,10 @@ void init_pins()
     gpio_set_direction(PIN_B, GPIO_MODE_INPUT);
     gpio_set_pull_mode(PIN_B, GPIO_PULLUP_ONLY);
 
-
-    //install gpio isr service
+    // install gpio isr service
     gpio_install_isr_service(0);
 
-    //hook isr handler for specific gpio pin
+    // hook isr handler for specific gpio pin
     gpio_isr_handler_add(PIN_STOP, sense_stop_isr, xTaskGetCurrentTaskHandle());
     gpio_set_intr_type(PIN_STOP, GPIO_INTR_ANYEDGE);
 
@@ -372,10 +391,10 @@ void nvs_read_config()
             ESP_LOGE(TAG, "Error nvs_get_str %s", esp_err_to_name(err));
         }
 
-        if (len) 
+        if (len)
         {
             char *str = malloc(len);
-            if (!str) 
+            if (!str)
             {
                 ESP_LOGE(TAG, "Failed to alloc str, len=%d", len);
                 nvs_close(nvs_handle);
@@ -440,10 +459,10 @@ void calibrate_stepper()
 {
     if (!gpio_get_level(PIN_STOP))
     {
-        ESP_LOGI(TAG, "Already stopped");    
+        ESP_LOGI(TAG, "Already stopped");
         return;
-    } 
-    
+    }
+
     ESP_LOGI(TAG, "Will calibrate stepper");
 
     gpio_set_level(PIN_LED, 1);
@@ -459,14 +478,12 @@ void calibrate_stepper()
     ledc_stop(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
 
     gpio_set_level(PIN_LED, 0);
-    
-    vTaskDelay(pdMS_TO_TICKS(1000));    
-}
 
+    vTaskDelay(pdMS_TO_TICKS(1000));
+}
 
 int step_max = 100;
 long step_acc = 0;
-int goal = 1200;
 int step;
 
 float r = 1;
@@ -475,22 +492,49 @@ float u = 0;
 float r_prev = 0;
 float r_prev_prev = 0;
 float u_prev = 0;
-//float dt = g_step_fwd_period_us; //us
+// float dt = g_step_fwd_period_us; //us
 bool flag = 0;
 
-static float u_integral = 0;     
-static float u_prev_error = 0;   
-static bool g_pid_enabled = true;   
-static  bool timer_paused = false; 
-
+static float u_integral = 0;
+static float u_prev_error = 0;
+static bool g_pid_enabled = true;
+static bool timer_paused = false;
 
 void app_main(void)
 {
     init_pins();
-    
- 
+
+    esp_err_t ret;
+    spi_device_handle_t spi;
+    spi_bus_config_t buscfg = {
+        .miso_io_num = PIN_NUM_MISO,
+        .mosi_io_num = PIN_NUM_MOSI,
+        .sclk_io_num = PIN_NUM_CLK,
+        .quadhd_io_num = -1,
+        .quadwp_io_num = -1,
+        .max_transfer_sz = 1};
+
+    spi_device_interface_config_t devcfg = {
+#ifdef CONFIG_OVERCLOCK
+        .clock_speed_hz = 26 * 1000 * 1000,
+#else
+        .clock_speed_hz = 1 * 1000 * 1000,
+#endif
+        .mode = 0,
+        .spics_io_num = PIN_NUM_SS,
+        .queue_size = 1,
+        .command_bits = 8,
+        .address_bits = 0,
+        .dummy_bits = 0,
+
+    };
+    ret = spi_bus_initialize(HOST, &buscfg, SPI_DMA_CH_AUTO);
+    ESP_ERROR_CHECK(ret);
+    ret = spi_bus_add_device(HOST, &devcfg, &spi);
+    ESP_ERROR_CHECK(ret);
+
     esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) 
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
@@ -499,143 +543,147 @@ void app_main(void)
 
     nvs_read_config();
 
-  
     t_eth_config config = {.ip = g_ip_addr, .pass = g_pass, .ssid = g_ssid, .use_eth = USE_COMMM_ETHERNET, .use_wifi_ap = USE_COMMM_WIFI_AP, .use_wifi_sta = USE_COMMM_WIFI_STA};
     eth_start(config);
 
-  
     g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
     assert(g_command_queue != NULL);
 
     if (USE_COMMM_ETHERNET || USE_COMMM_WIFI_AP || USE_COMMM_WIFI_STA)
     {
         xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 1, NULL);
-        xTaskCreate(udp_server_task, "udp_server", 4096, (void*)AF_INET, 1, NULL);
+        xTaskCreate(udp_server_task, "udp_server", 4096, (void *)AF_INET, 1, NULL);
     }
 
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    float u = 0;           // Управляющий сигнал
-    float r = 0;           // Ошибка
-    int dir = 1;           // Направление
+    float u = 0; // Управляющий сигнал
+    float r = 0; // Ошибка
+    int dir = 1; // Направление
 
-    
-     ledc_timer_config_t ledc_timer1 = {
-         .speed_mode       = LEDC_LOW_SPEED_MODE,
-         .duty_resolution  = DEFAULT_DUTY_RESOLUTION,
-         .timer_num        = LEDC_TIMER_0,
-         .freq_hz          = min_freq,
-         .clk_cfg          = LEDC_AUTO_CLK
-     };
-     ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer1));
+    ledc_timer_config_t ledc_timer1 = {
+        .speed_mode = LEDC_HIGH_SPEED_MODE,
+        .duty_resolution = DEFAULT_DUTY_RESOLUTION,
+        .timer_num = LEDC_TIMER_0,
+        .freq_hz = min_freq,
+        .clk_cfg = LEDC_AUTO_CLK};
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer1));
 
-     ledc_channel_config_t ledc_channel1 = {
-         .speed_mode     = LEDC_LOW_SPEED_MODE,
-         .channel        = LEDC_CHANNEL_0,
-         .timer_sel      = LEDC_TIMER_0,
-         .intr_type      = LEDC_INTR_DISABLE,
-         .gpio_num       = PIN_STEP,
-         .duty           = (int)(pow(2,bit - 1)),
-         .hpoint         = 0
-     };
-     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel1));
+    ledc_channel_config_t ledc_channel1 = {
+        .speed_mode = LEDC_HIGH_SPEED_MODE,
+        .channel = LEDC_CHANNEL_0,
+        .timer_sel = LEDC_TIMER_0,
+        .intr_type = LEDC_INTR_DISABLE,
+        .gpio_num = PIN_STEP,
+        .duty = (int)(pow(2, bit - 1)),
+        .hpoint = 0};
+    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel1));
 
     ESP_LOGI(TAG, "PID control task started");
 
     // Увеличим частоту отправки телеметрии (каждые 50 мс вместо 100 мс)
     int telemetry_counter = 0;
-    const int TELEMETRY_INTERVAL_MS = 50;  // 50 мс = 20 раз в секунду
-    const int TELEMETRY_TICKS = TELEMETRY_INTERVAL_MS / 10;  // 5 тиков
+    const int TELEMETRY_INTERVAL_MS = 50;                   // 50 мс = 20 раз в секунду
+    const int TELEMETRY_TICKS = TELEMETRY_INTERVAL_MS / 10; // 5 тиков
 
-     while (1)
+    int log_count = 0;
+
+    while (1)
     {
-    
-        int r = goal - s; 
+        uint8_t test_buf[8] = "00000000";
+        // ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", test_buf[0],test_buf[1],test_buf[2],test_buf[3],test_buf[4],test_buf[5],test_buf[6],test_buf[7]);
 
-            if (abs(r) > 2 && !g_pid_enabled) {
-            ESP_LOGI(TAG, "Auto-return: was at target, now error=%d, restarting PID", abs(r));
-            g_pid_enabled = true;
+        ret = data(spi, test_buf, sizeof(test_buf));
+
+        if (ret == ESP_OK)
+        {
+            ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", test_buf[0], test_buf[1], test_buf[2], test_buf[3], test_buf[4], test_buf[5], test_buf[6], test_buf[7]);
+            int32_t pos = ((uint32_t)test_buf[1] << 16) + ((uint32_t)test_buf[2] << 8) + (uint32_t)test_buf[3];
+            uint32_t timecode = ((uint32_t)test_buf[4] << 24) + ((uint32_t)test_buf[5] << 16) + ((uint32_t)test_buf[6] << 8) + (uint32_t)test_buf[7];
+            s = (pos - 1048576);
+            t = (double)timecode * 20 / 1000000000;
+            ESP_LOGI("flag, pos, angle, time", "%i %i %.2f %.2f", test_buf[0] / 128, s, (((float)pos - 1048576) / 4) * 360 / 2048, (double)timecode * 20 / 1000000000);
         }
 
-        //ESP_LOGI(TAG, "s=%i, goal=%i, r=%f", s, goal, r);
-        if (g_pid_enabled && abs(r) > 2) 
+        signed int r = goal - s;
+        // ESP_LOGI(TAG, "s=%i, goal=%i, r=%f", s, goal, r);
+
+        if (abs(r) > 0)
         {
-            
-            if (timer_paused) {
-                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2,bit - 1)));  
-                ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+            if (timer_paused)
+            {
+                ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, DUTY_RESOLUTION_BIT - 1)));
+                ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
                 timer_paused = false;
                 ESP_LOGI(TAG, "Timer resumed");
             }
 
             float p_term = Kp * r;
-            
-            
+
             u_integral += r;
-            if (u_integral > 1000) u_integral = 1000;
-            if (u_integral < -1000) u_integral = -1000;
+            // if (u_integral > 1000) u_integral = 1000;
+            // if (u_integral < -1000) u_integral = -1000;
+            u_integral = (u_integral > 1000) ? 1000 : (u_integral < -1000) ? -1000
+                                                                           : u_integral;
             float i_term = Ki * u_integral;
-            
-           
+
             float d_term = Kd * (r - u_prev_error);
             u_prev_error = r;
-            
-           
-            u = p_term + i_term + d_term;
-            
-            
-            if (u > 3999) u = 3999;
-            if (u < -3999) u = -3999;
 
-           
+            u = p_term + i_term + d_term;
+
+            float u_max = 7000;
+            // if (u > u_max) u = u_max;
+            // if (u < -u_max) u = -u_max;
+            u = (u > u_max) ? u_max : (u < -u_max) ? -u_max
+                                                   : u;
+
             dir = (u >= 0) ? 1 : 0;
             float frequency = abs(u);
-            if (frequency < min_freq) frequency = min_freq;
+            if (frequency < min_freq)
+                frequency = min_freq;
 
-          
             gpio_set_level(PIN_DIR, dir);
-            
-           
-            ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, (uint32_t)frequency);
-            ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-            ESP_LOGI(TAG, "u=%f", u);
-            ESP_LOGI(TAG, "freq=%i", (uint32_t)frequency);
-            
-           
-            static int log_count = 0;
-            if (log_count++ % 50 == 0) {
-                ESP_LOGI(TAG, "s=%i, goal=%i, err=%d\n", 
-                        s, goal, r);
-            }
+
+            ledc_set_freq(LEDC_HIGH_SPEED_MODE, LEDC_TIMER_0, (int)frequency);
+            ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
         }
-        else
+        else if (!timer_paused)
         {
-            // Остановка ШИМ при достижении цели или выключении ПИД
-            if (!timer_paused && abs(r) <= 2) {
-                // Устанавливаем скважность 0% - нет импульсов, но таймер работает
-                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-                ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-                timer_paused = true;
-                g_pid_enabled = false;
-                ESP_LOGI(TAG, "Timer paused (duty=0)");
-            }
-            
+            // Устанавливаем скважность 0% - нет импульсов, но таймер работает
+            ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
+            ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
+            timer_paused = true;
+            ESP_LOGI(TAG, "Timer paused (duty=0)");
+        }
+
+        if (log_count++ == 50)
+        {
+            ESP_LOGI(TAG, "s=%i, goal=%i, err=%d\n", s, goal, r);
+            log_count = 0;
         }
 
         telemetry_counter++;
-        if (telemetry_counter >= TELEMETRY_TICKS) {
+        if (telemetry_counter >= TELEMETRY_TICKS)
+        {
             telemetry_counter = 0;
-            
-            if (g_flag_send_telemetry) {
+
+            if (g_flag_send_telemetry)
+            {
                 char *telemetry_to_send = build_telemetry_string();
-                if (telemetry_to_send) {
+                if (telemetry_to_send)
+                {
                     // Отправка телеметрии на последний известный адрес
                     int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-                    if (sock >= 0) {
-                        int err = sendto(sock, telemetry_to_send, strlen(telemetry_to_send), 0, 
-                               (struct sockaddr *)&g_last_cmd_source_addr, sizeof(struct sockaddr));
-                        if (err < 0) {
+                    if (sock >= 0)
+                    {
+                        int err = sendto(sock, telemetry_to_send, strlen(telemetry_to_send), 0,
+                                         (struct sockaddr *)&g_last_cmd_source_addr, sizeof(struct sockaddr));
+                        if (err < 0)
+                        {
                             ESP_LOGW(TAG, "Failed to send telemetry: errno %d", errno);
-                        } else {
+                        }
+                        else
+                        {
                             ESP_LOGI(TAG, "Telemetry sent: s=%d", s);
                         }
                         close(sock);
@@ -647,6 +695,4 @@ void app_main(void)
 
         vTaskDelay(pdMS_TO_TICKS(10));
     }
- }
-
-
+}
