@@ -61,21 +61,42 @@ int32_t pid_r_prev = 0;
 // Данные о положении энкодера
 int32_t enc_goal = DEFAULT_ENC_GOAL;
 int32_t enc_pos = 0;
+int32_t enc_pos_prev = 0;
+double enc_vel = 0;
 double enc_angle = 0;
+double enc_angle_prev = 0;
 double time_count = 0;
+double time_count_prev = 0;
+
+//
+int32_t enc_avg_pos = 0;
+int32_t enc_avg_pos_start = 0;
+double enc_avg_vel = 0;
+double avg_time_count_start = 0;
+double enc_theor = DEFAULT_ENC_GOAL;
+double enc_delta_vel_max = 100;
+double enc_avg_freq = 0;
+
+int timeout_counter = 0;
+int timeout_counter_max = DEFAULT_TIMEOUT_COUNTER_MAX;
+bool flag_auto_timeout_max = false;
+bool flag_timeout = false;
 
 // Параметры ШИМ
 unsigned int pwm_freq = 0;
 unsigned int pwm_freq_min = DEFAULT_PWM_FREQ_MIN;
-unsigned int pwm_freq_max = DEFAULT_PWM_FREQ_MAX;
+unsigned int pwm_freq_max_static = DEFAULT_PWM_FREQ_MAX;
+unsigned int pwm_freq_max_dynamic = DEFAULT_PWM_FREQ_MAX;
 bool pwm_flag_paused = false;
 int pwm_dir = 1;
 
-// Параметры телеметрии и логов
+// Счётчики
 int log_counter = 0;
 int log_counter_max = DEFAULT_LOG_COUNTER_MAX;
 int telemetry_counter = 0;                   
 int telemetry_counter_max = DEFAULT_TELEMETRY_COUNTER_MAX;
+int avg_counter = 0;
+int avg_counter_max = 5*DEFAULT_TELEMETRY_COUNTER_MAX;
 
 QueueHandle_t g_command_queue;
 
@@ -107,7 +128,13 @@ void append_telemetry_data(cJSON *json)
 {
     cJSON_AddBoolToObject(json, STR_TELEMETRY, true);
     cJSON_AddNumberToObject(json, "enc_pos", enc_pos);
-    cJSON_AddNumberToObject(json, "time_count", time_count);       // Текущее положение мотора
+    cJSON_AddNumberToObject(json, "enc_vel", enc_avg_vel);
+    cJSON_AddNumberToObject(json, "time_count", time_count); // Текущее положение мотора
+    cJSON_AddNumberToObject(json, "timeout_counter", timeout_counter);
+    cJSON_AddNumberToObject(json, "flag_timeout", flag_timeout);
+    cJSON_AddNumberToObject(json, "avg_counter", avg_counter);
+    cJSON_AddNumberToObject(json, "log_counter", log_counter);
+
 }
 
 char *build_telemetry_string()
@@ -135,9 +162,12 @@ char *build_config_string(bool for_nvs)
     cJSON_AddNumberToObject(json, STR_PID_KI, pid_ki);
     cJSON_AddNumberToObject(json, STR_PID_KD, pid_kd);
     cJSON_AddNumberToObject(json, STR_PWM_FREQ_MIN, pwm_freq_min);
-    cJSON_AddNumberToObject(json, STR_PWM_FREQ_MAX, pwm_freq_max);
+    cJSON_AddNumberToObject(json, STR_PWM_FREQ_MAX_STATIC, pwm_freq_max_static);
+    cJSON_AddNumberToObject(json, STR_PWM_FREQ_MAX_DYNAMIC, pwm_freq_max_dynamic);
     cJSON_AddNumberToObject(json, STR_LOG_COUNTER_MAX, log_counter_max);
     cJSON_AddNumberToObject(json, STR_TELEMETRY_COUNTER_MAX, telemetry_counter_max);
+    cJSON_AddNumberToObject(json, "timeout_counter_max", timeout_counter_max);
+
 
     if (!for_nvs)
     {
@@ -199,8 +229,10 @@ void parse_config_string(const char *str)
                 pid_kd = subitem->valuedouble;
             if (!strcmp(param_name, STR_PWM_FREQ_MIN))
                 pwm_freq_min = subitem->valueint;
-            if (!strcmp(param_name, STR_PWM_FREQ_MAX))
-                pwm_freq_max = subitem->valueint;
+            if (!strcmp(param_name, STR_PWM_FREQ_MAX_STATIC))
+                pwm_freq_max_static = subitem->valueint;
+            if (!strcmp(param_name, STR_PWM_FREQ_MAX_DYNAMIC))
+                pwm_freq_max_dynamic = subitem->valueint;
             if (!strcmp(param_name, STR_LOG_COUNTER_MAX))
             {
                 log_counter_max = subitem->valueint;
@@ -211,6 +243,10 @@ void parse_config_string(const char *str)
                 telemetry_counter_max = subitem->valueint;
                 telemetry_counter = 0;
             }
+            if (!strcmp(param_name, "flag_auto_timeout_max"))
+                flag_auto_timeout_max = subitem->valueint;
+            if (!strcmp(param_name, "timeout_counter_max"))
+                timeout_counter_max = subitem->valueint;
 
             if (!strcmp(param_name, STR_CMD_READ_FLASH) && subitem->valueint)
                 nvs_read_config();
@@ -398,6 +434,7 @@ void app_main(void)
 {
     init_pins();
 
+    TickType_t xLastWakeTime = xTaskGetTickCount();
     esp_err_t ret;
     spi_device_handle_t spi;
     spi_bus_config_t buscfg = {
@@ -471,68 +508,112 @@ void app_main(void)
 
     while (1)
     {
+        if (timeout_counter > timeout_counter_max)
+        {
+            flag_timeout = true;
+            ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
+            ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
+            pwm_flag_paused = true;
+            ESP_LOGI("AAAAA", "TIMEOUT");
+        }
         uint8_t spi_test_buf[8] = "00000000";
         // ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", spi_test_buf[0],spi_test_buf[1],spi_test_buf[2],spi_test_buf[3],spi_test_buf[4],spi_test_buf[5],spi_test_buf[6],spi_test_buf[7]);
-
         ret = data(spi, spi_test_buf, sizeof(spi_test_buf));
-        ESP_LOGI("11", "%i", (int)true);
 
         if (ret == ESP_OK)
         {
-            ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", spi_test_buf[0], spi_test_buf[1], 
-                spi_test_buf[2], spi_test_buf[3], spi_test_buf[4], spi_test_buf[5], spi_test_buf[6], spi_test_buf[7]);
-            
             int32_t spi_enc_count = ((uint32_t)spi_test_buf[1] << 16) + ((uint32_t)spi_test_buf[2] << 8) + (uint32_t)spi_test_buf[3];
             uint32_t spi_time_count = ((uint32_t)spi_test_buf[4] << 24) + ((uint32_t)spi_test_buf[5] << 16) + ((uint32_t)spi_test_buf[6] << 8) + (uint32_t)spi_test_buf[7];
+            enc_pos_prev = enc_pos;
             enc_pos = (spi_enc_count - 1048576);
+            time_count_prev = time_count;
             time_count = (double)spi_time_count * 20 / 1000000000;
+            enc_angle_prev = enc_angle;
             enc_angle = (((double)spi_enc_count - 1048576) / 4) * 360 / 2048;
             
-            ESP_LOGI("flag, enc_pos, angle, time_count", "%i %i %.2f %.2f", spi_test_buf[0] / 128, enc_pos, enc_angle, time_count);
+            if (time_count - time_count_prev != 0) enc_vel = (enc_pos - enc_pos_prev) / (time_count - time_count_prev);
+            else enc_vel = 0;
+            
+            if (avg_counter++ >= avg_counter_max)
+            {
+                enc_avg_pos /= 25;
+                if (time_count - avg_time_count_start != 0)
+                {
+                    enc_avg_vel /= (time_count - avg_time_count_start);
+                    enc_avg_freq = enc_theor / (time_count - avg_time_count_start);
+                }
+                else
+                {
+                    enc_avg_vel = 0;
+                    enc_avg_freq = 0;
+                }
+                ESP_LOGI("ttt", "enc_pos = %i, enc_avg_pos_start = %i, enc_avg_vel = %.4f", enc_pos, enc_avg_pos_start, enc_avg_vel);
+                ESP_LOGI("yyy", "pwm_freq = %i, enc_avg_freq = %.4f, %.4f", pwm_freq, enc_avg_freq, (time_count - avg_time_count_start));
+                avg_time_count_start = time_count;
+                enc_avg_pos_start = enc_pos;
+                
+                enc_avg_pos = 0;
+                enc_avg_vel = 0;
+                enc_theor = 0;
+                avg_counter = 0;
+            }
+            // ESP_LOGI("flag, enc_pos, angle, time_count, enc_vel", "%i %i %.2f %.2f %.2f", spi_test_buf[0] / 128, enc_pos, enc_angle, time_count, enc_vel);
         }
 
         pid_r = enc_goal - enc_pos;
         // ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, pid_r=%f", enc_pos, enc_goal, pid_r);
-
-        if (abs(pid_r) > 0)
+        if (!flag_timeout)
         {
-            if (pwm_flag_paused)
+            if (abs(pid_r) > 2)
             {
-                ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, DEFAULT_DUTY_RESOLUTION_BIT - 1)));
+                if (pwm_flag_paused)
+                {
+                    ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, DEFAULT_DUTY_RESOLUTION_BIT - 1)));
+                    ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
+                    pwm_flag_paused = false;
+                    ESP_LOGI(TAG, "Timer resumed");
+                }
+
+                pid_up = pid_kp * pid_r;
+                pid_ui += pid_ki * pid_r;
+                pid_ui = (pid_ui > 1000) ? 1000 : (pid_ui < -1000) ? -1000 : pid_ui;
+                pid_ud = pid_kd * (pid_r - pid_r_prev);
+
+                pid_u = pid_up + pid_ui + pid_ud;
+                pid_r_prev = pid_r;
+
+                pwm_dir = (pid_u >= 0) ? 1 : 0;
+                pwm_freq = abs((int)pid_u);
+                pwm_freq = (pwm_freq < pwm_freq_min) ? pwm_freq_min : pwm_freq;
+                pwm_freq = (pwm_freq > pwm_freq_max_static) ? pwm_freq_max_static : pwm_freq;
+
+                enc_avg_pos += enc_pos;
+                enc_avg_vel += abs(enc_pos - enc_pos_prev);
+                enc_theor += ((double)8192 / 25000 * pwm_freq * 20 / 1000);
+                ESP_LOGI("ddd", "enc_theor = %.4f, freq = %i", enc_theor, pwm_freq);
+
+                gpio_set_level(PIN_DIR, pwm_dir);
+
+                ledc_set_freq(LEDC_HIGH_SPEED_MODE, LEDC_TIMER_0, pwm_freq);
                 ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
-                pwm_flag_paused = false;
-                ESP_LOGI(TAG, "Timer resumed");
+                timeout_counter++;
             }
-
-            pid_up = pid_kp * pid_r;
-            pid_ui += pid_ki * pid_r;
-            pid_ui = (pid_ui > 1000) ? 1000 : (pid_ui < -1000) ? -1000 : pid_ui;
-            pid_ud = pid_kd * (pid_r - pid_r_prev);
-
-            pid_u = pid_up + pid_ui + pid_ud;
-            pid_r_prev = pid_r;
-
-            pwm_dir = (pid_u >= 0) ? 1 : 0;
-            pwm_freq = abs((int)pid_u);
-            pwm_freq = (pwm_freq < pwm_freq_min) ? pwm_freq_min : pwm_freq;
-            pwm_freq = (pwm_freq > pwm_freq_max) ? pwm_freq_max : pwm_freq;
-
-            gpio_set_level(PIN_DIR, pwm_dir);
-
-            ledc_set_freq(LEDC_HIGH_SPEED_MODE, LEDC_TIMER_0, pwm_freq);
-            ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
-        }
-        else if (!pwm_flag_paused)
-        {
-            // Устанавливаем скважность 0% - нет импульсов, но таймер работает
-            ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
-            ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
-            pwm_flag_paused = true;
-            ESP_LOGI(TAG, "Timer paused (duty=0)");
+            else if (!pwm_flag_paused)
+            {
+                // Устанавливаем скважность 0% - нет импульсов, но таймер работает
+                ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
+                pwm_flag_paused = true;
+                ESP_LOGI(TAG, "Timer paused (duty=0)");
+                timeout_counter = 0;
+                avg_counter = 0;
+            }
         }
 
         if (log_counter++ >= log_counter_max)
         {
+            ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", spi_test_buf[0], spi_test_buf[1], 
+                spi_test_buf[2], spi_test_buf[3], spi_test_buf[4], spi_test_buf[5], spi_test_buf[6], spi_test_buf[7]);
             ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, err=%d\n", enc_pos, enc_goal, pid_r);
             log_counter = 0;
         }
@@ -541,6 +622,8 @@ void app_main(void)
         {
             if (g_flag_send_telemetry)
             {
+                // enc_pos = -enc_pos;
+                // time_count += 1;
                 char *telemetry_to_send = build_telemetry_string();
                 if (telemetry_to_send)
                 {
@@ -556,7 +639,7 @@ void app_main(void)
                         }
                         else
                         {
-                            ESP_LOGI(TAG, "Telemetry sent: enc_pos=%d", enc_pos);
+                            //ESP_LOGI(TAG, "Telemetry sent: enc_pos=%d", enc_pos);
                         }
                         close(sock);
                     }
@@ -566,6 +649,6 @@ void app_main(void)
             telemetry_counter = 0;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(20));
     }
 }

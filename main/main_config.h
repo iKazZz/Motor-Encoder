@@ -14,16 +14,16 @@
 #define WIFI_AP_PASS            ""
 #define WIFI_AP_CHANNEL         (0)
 
-// #define DEFAULT_WIFI_STA_SSID   "Aud112"
-#define DEFAULT_WIFI_STA_SSID   "RT-GPON-F6ED"
+#define DEFAULT_WIFI_STA_SSID   "Aud112"
+// #define DEFAULT_WIFI_STA_SSID   "RT-GPON-F6ED"
 // #define DEFAULT_WIFI_STA_SSID   "Nadya 5 g"
 
-// #define DEFAULT_WIFI_STA_PASS   "justapassword"
-#define DEFAULT_WIFI_STA_PASS   "yPYAEyYsUE"
+#define DEFAULT_WIFI_STA_PASS   "justapassword"
+// #define DEFAULT_WIFI_STA_PASS   "yPYAEyYsUE"
 // #define DEFAULT_WIFI_STA_PASS   "25049025"
 
-// #define DEFAULT_STATIC_IP_ADDR  "192.168.1.10"
-#define DEFAULT_STATIC_IP_ADDR  "192.168.0.10"
+#define DEFAULT_STATIC_IP_ADDR  "192.168.1.10"
+// #define DEFAULT_STATIC_IP_ADDR  "192.168.0.10"
 // #define DEFAULT_STATIC_IP_ADDR  "192.168.0.50"
 
 #define STATIC_NETMASK_ADDR     "255.255.255.0"
@@ -54,7 +54,7 @@
 #define PIN_NUM_CLK             (18)
 #define PIN_NUM_SS              (5)
 
-#define DEFAULT_PID_KP          (0.01)
+#define DEFAULT_PID_KP          (1)
 #define DEFAULT_PID_KI          (0)
 #define DEFAULT_PID_KD          (0)
 
@@ -66,16 +66,18 @@
 
 #define DEFAULT_DUTY_RESOLUTION_BIT     (4)
 #define DEFAULT_TELEMETRY_COUNTER_MAX   (5) // 1 тик = 10 мс
-#define DEFAULT_LOG_COUNTER_MAX         (50)
+#define DEFAULT_LOG_COUNTER_MAX         (200)
 #define DEFAULT_PWM_FREQ_MIN            (200)
 #define DEFAULT_PWM_FREQ_MAX            (7000)
-#define DEFAULT_ENC_GOAL                (4096)
+#define DEFAULT_ENC_GOAL                (0)
+#define DEFAULT_TIMEOUT_COUNTER_MAX     (10000)
 
 #define STR_DUTY_RESOLUTION_BIT         "duty_resolution_bit"
 #define STR_TELEMETRY_COUNTER_MAX       "telemetry_counter_max"
 #define STR_LOG_COUNTER_MAX             "log_counter_max"
 #define STR_PWM_FREQ_MIN                "pwm_freq_min"
-#define STR_PWM_FREQ_MAX                "pwm_freq_max"
+#define STR_PWM_FREQ_MAX_STATIC         "pwm_freq_max_static"
+#define STR_PWM_FREQ_MAX_DYNAMIC        "pwm_freq_max_dynamic"
 #define STR_ENC_GOAL                    "enc_goal"
 
 #if (DEFAULT_DUTY_RESOLUTION_BIT == 1) 
