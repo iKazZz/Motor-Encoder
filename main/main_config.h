@@ -43,16 +43,16 @@
 #define STR_CMD_READ_FLASH      "restore_from_flash"
 #define STR_CMD_WRITE_FLASH     "save_to_flash"
 
-#define PIN_PUL                 (32)
-#define PIN_DIR                 (33)
-#define PIN_STOP                (15)
-#define PIN_LED                 (2)
+#define PIN_PUL                 (5)
+#define PIN_DIR                 (2)
+//#define PIN_STOP                (15)
+//#define PIN_LED                 (2)
 
-#define HOST                    SPI3_HOST
-#define PIN_NUM_MISO            (19)
-#define PIN_NUM_MOSI            (23)
-#define PIN_NUM_CLK             (18)
-#define PIN_NUM_SS              (5)
+#define HOST                    SPI2_HOST
+#define PIN_NUM_MISO            (12)
+#define PIN_NUM_MOSI            (13)
+#define PIN_NUM_CLK             (14)
+#define PIN_NUM_SS              (15)
 
 #define DEFAULT_PID_KP          (1)
 #define DEFAULT_PID_KI          (0)

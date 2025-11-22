@@ -60,9 +60,9 @@ int32_t pid_r_prev = 0;
 
 // Данные о положении энкодера
 int32_t enc_goal = DEFAULT_ENC_GOAL;
-int32_t enc_pos = 0;
+int32_t enc_pos = 100;
 int32_t enc_pos_prev = 0;
-double enc_vel = 0;
+double enc_vel = 200;
 double enc_angle = 0;
 double enc_angle_prev = 0;
 double time_count = 0;
@@ -73,7 +73,7 @@ int32_t enc_avg_pos = 0;
 int32_t enc_avg_pos_start = 0;
 double enc_avg_vel = 0;
 double avg_time_count_start = 0;
-double enc_theor = DEFAULT_ENC_GOAL;
+double enc_avg_vel_th = DEFAULT_ENC_GOAL;
 double enc_delta_vel_max = 100;
 double enc_avg_freq = 0;
 
@@ -96,7 +96,7 @@ int log_counter_max = DEFAULT_LOG_COUNTER_MAX;
 int telemetry_counter = 0;                   
 int telemetry_counter_max = DEFAULT_TELEMETRY_COUNTER_MAX;
 int avg_counter = 0;
-int avg_counter_max = 5*DEFAULT_TELEMETRY_COUNTER_MAX;
+int avg_counter_max = DEFAULT_TELEMETRY_COUNTER_MAX;
 
 QueueHandle_t g_command_queue;
 
@@ -115,7 +115,7 @@ esp_err_t data(spi_device_handle_t spi, uint8_t *data, int len)
     t.cmd = 0x01;
     t.addr = 0;
     t.length = len * 8;
-    t.tx_buffer = 0;
+    t.tx_buffer = NULL;
     t.rxlength = t.length;
     t.rx_buffer = data;
     t.user = 0;
@@ -126,15 +126,16 @@ esp_err_t data(spi_device_handle_t spi, uint8_t *data, int len)
 
 void append_telemetry_data(cJSON *json)
 {
-    cJSON_AddBoolToObject(json, STR_TELEMETRY, true);
+    cJSON_AddBoolToObject(json, "telemetry", true);
     cJSON_AddNumberToObject(json, "enc_pos", enc_pos);
-    cJSON_AddNumberToObject(json, "enc_vel", enc_avg_vel);
-    cJSON_AddNumberToObject(json, "time_count", time_count); // Текущее положение мотора
+    cJSON_AddNumberToObject(json, "enc_vel", enc_vel);
+    cJSON_AddNumberToObject(json, "enc_avg_vel", enc_avg_vel);
+    cJSON_AddNumberToObject(json, "enc_avg_vel_th", enc_avg_vel_th);
+    cJSON_AddNumberToObject(json, "time_count", time_count);
     cJSON_AddNumberToObject(json, "timeout_counter", timeout_counter);
     cJSON_AddNumberToObject(json, "flag_timeout", flag_timeout);
     cJSON_AddNumberToObject(json, "avg_counter", avg_counter);
     cJSON_AddNumberToObject(json, "log_counter", log_counter);
-
 }
 
 char *build_telemetry_string()
@@ -332,20 +333,20 @@ void init_pins()
     gpio_set_direction(PIN_DIR, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_DIR, 0);
 
-    gpio_reset_pin(PIN_STOP);
-    gpio_set_direction(PIN_STOP, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(PIN_STOP, GPIO_PULLUP_ONLY);
+    // gpio_reset_pin(PIN_STOP);
+    // gpio_set_direction(PIN_STOP, GPIO_MODE_INPUT);
+    // gpio_set_pull_mode(PIN_STOP, GPIO_PULLUP_ONLY);
 
-    gpio_reset_pin(PIN_LED);
-    gpio_set_direction(PIN_LED, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_LED, 1);
+    // gpio_reset_pin(PIN_LED);
+    // gpio_set_direction(PIN_LED, GPIO_MODE_OUTPUT);
+    // gpio_set_level(PIN_LED, 1);
 
     // install gpio isr service
     gpio_install_isr_service(0);
 
     // hook isr handler for specific gpio pin
-    gpio_isr_handler_add(PIN_STOP, sense_stop_isr, xTaskGetCurrentTaskHandle());
-    gpio_set_intr_type(PIN_STOP, GPIO_INTR_ANYEDGE);
+    // gpio_isr_handler_add(PIN_STOP, sense_stop_isr, xTaskGetCurrentTaskHandle());
+    // gpio_set_intr_type(PIN_STOP, GPIO_INTR_ANYEDGE);
 }
 
 void nvs_read_config()
@@ -429,6 +430,7 @@ void nvs_write_config()
     }
 }
 
+        uint8_t spi_test_buf[8] = "00000000";
 
 void app_main(void)
 {
@@ -448,9 +450,9 @@ void app_main(void)
         #ifdef CONFIG_OVERCLOCK
             .clock_speed_hz = 26 * 1000 * 1000,
         #else
-            .clock_speed_hz = 1 * 1000 * 1000,
+            .clock_speed_hz = 10 * 1000 * 1000,
         #endif
-        .mode = 0,
+        .mode = 1,
         .spics_io_num = PIN_NUM_SS,
         .queue_size = 1,
         .command_bits = 8,
@@ -471,7 +473,6 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     nvs_read_config();
-
     t_eth_config config = {.ip = g_ip_addr, .pass = g_pass, .ssid = g_ssid, .use_eth = USE_COMMM_ETHERNET, .use_wifi_ap = USE_COMMM_WIFI_AP, .use_wifi_sta = USE_COMMM_WIFI_STA};
     eth_start(config);
 
@@ -516,14 +517,13 @@ void app_main(void)
             pwm_flag_paused = true;
             ESP_LOGI("AAAAA", "TIMEOUT");
         }
-        uint8_t spi_test_buf[8] = "00000000";
-        // ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", spi_test_buf[0],spi_test_buf[1],spi_test_buf[2],spi_test_buf[3],spi_test_buf[4],spi_test_buf[5],spi_test_buf[6],spi_test_buf[7]);
         ret = data(spi, spi_test_buf, sizeof(spi_test_buf));
 
         if (ret == ESP_OK)
         {
             int32_t spi_enc_count = ((uint32_t)spi_test_buf[1] << 16) + ((uint32_t)spi_test_buf[2] << 8) + (uint32_t)spi_test_buf[3];
             uint32_t spi_time_count = ((uint32_t)spi_test_buf[4] << 24) + ((uint32_t)spi_test_buf[5] << 16) + ((uint32_t)spi_test_buf[6] << 8) + (uint32_t)spi_test_buf[7];
+            ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", spi_test_buf[0],spi_test_buf[1],spi_test_buf[2],spi_test_buf[3],spi_test_buf[4],spi_test_buf[5],spi_test_buf[6],spi_test_buf[7]);
             enc_pos_prev = enc_pos;
             enc_pos = (spi_enc_count - 1048576);
             time_count_prev = time_count;
@@ -531,40 +531,44 @@ void app_main(void)
             enc_angle_prev = enc_angle;
             enc_angle = (((double)spi_enc_count - 1048576) / 4) * 360 / 2048;
             
+            ESP_LOGI("111", "1");
             if (time_count - time_count_prev != 0) enc_vel = (enc_pos - enc_pos_prev) / (time_count - time_count_prev);
             else enc_vel = 0;
-            
+
             if (avg_counter++ >= avg_counter_max)
             {
-                enc_avg_pos /= 25;
+                            ESP_LOGI("111", "2");
+
                 if (time_count - avg_time_count_start != 0)
                 {
-                    enc_avg_vel /= (time_count - avg_time_count_start);
-                    enc_avg_freq = enc_theor / (time_count - avg_time_count_start);
+                    enc_avg_vel = (enc_pos - enc_avg_pos_start) / (time_count - avg_time_count_start);
+                    enc_avg_freq = enc_avg_vel_th;
                 }
                 else
                 {
                     enc_avg_vel = 0;
                     enc_avg_freq = 0;
                 }
-                ESP_LOGI("ttt", "enc_pos = %i, enc_avg_pos_start = %i, enc_avg_vel = %.4f", enc_pos, enc_avg_pos_start, enc_avg_vel);
-                ESP_LOGI("yyy", "pwm_freq = %i, enc_avg_freq = %.4f, %.4f", pwm_freq, enc_avg_freq, (time_count - avg_time_count_start));
+                enc_avg_vel_th = ((double)8192 / 25000 * pwm_freq);
+                enc_avg_vel_th = (pwm_dir == 1) ? enc_avg_vel_th : -enc_avg_vel_th;
+                ///ESP_LOGI("ttt", "enc_pos = %i, enc_avg_pos_start = %i, enc_avg_vel = %.4f", enc_pos, enc_avg_pos_start, enc_avg_vel);
+                //ESP_LOGI("yyy", "pwm_freq = %i, enc_avg_freq = %.4f, %.4f", pwm_freq, enc_avg_freq, (time_count - avg_time_count_start));
                 avg_time_count_start = time_count;
                 enc_avg_pos_start = enc_pos;
                 
-                enc_avg_pos = 0;
-                enc_avg_vel = 0;
-                enc_theor = 0;
+                //enc_avg_pos = 0;
+                //enc_avg_vel = 0;
+                //enc_avg_vel_th = 0;
                 avg_counter = 0;
             }
             // ESP_LOGI("flag, enc_pos, angle, time_count, enc_vel", "%i %i %.2f %.2f %.2f", spi_test_buf[0] / 128, enc_pos, enc_angle, time_count, enc_vel);
         }
 
         pid_r = enc_goal - enc_pos;
-        // ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, pid_r=%f", enc_pos, enc_goal, pid_r);
+        ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, pid_r=%i", enc_pos, enc_goal, pid_r);
         if (!flag_timeout)
         {
-            if (abs(pid_r) > 2)
+            if (abs(pid_r) > 0)
             {
                 if (pwm_flag_paused)
                 {
@@ -573,6 +577,8 @@ void app_main(void)
                     pwm_flag_paused = false;
                     ESP_LOGI(TAG, "Timer resumed");
                 }
+
+                            ESP_LOGI("111", "3");
 
                 pid_up = pid_kp * pid_r;
                 pid_ui += pid_ki * pid_r;
@@ -587,10 +593,9 @@ void app_main(void)
                 pwm_freq = (pwm_freq < pwm_freq_min) ? pwm_freq_min : pwm_freq;
                 pwm_freq = (pwm_freq > pwm_freq_max_static) ? pwm_freq_max_static : pwm_freq;
 
-                enc_avg_pos += enc_pos;
-                enc_avg_vel += abs(enc_pos - enc_pos_prev);
-                enc_theor += ((double)8192 / 25000 * pwm_freq * 20 / 1000);
-                ESP_LOGI("ddd", "enc_theor = %.4f, freq = %i", enc_theor, pwm_freq);
+                //enc_avg_pos += enc_pos;
+                //enc_avg_vel += enc_pos - enc_pos_prev;
+                ESP_LOGI("ddd", "enc_avg_vel_th = %.4f, freq = %i", enc_avg_vel_th, pwm_freq);
 
                 gpio_set_level(PIN_DIR, pwm_dir);
 
@@ -605,6 +610,7 @@ void app_main(void)
                 ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
                 pwm_flag_paused = true;
                 ESP_LOGI(TAG, "Timer paused (duty=0)");
+                pwm_freq = 0;
                 timeout_counter = 0;
                 avg_counter = 0;
             }
@@ -622,8 +628,6 @@ void app_main(void)
         {
             if (g_flag_send_telemetry)
             {
-                // enc_pos = -enc_pos;
-                // time_count += 1;
                 char *telemetry_to_send = build_telemetry_string();
                 if (telemetry_to_send)
                 {
@@ -639,16 +643,20 @@ void app_main(void)
                         }
                         else
                         {
-                            //ESP_LOGI(TAG, "Telemetry sent: enc_pos=%d", enc_pos);
+                            ESP_LOGI(TAG, "Telemetry sent: enc_pos=%d", enc_pos);
                         }
                         close(sock);
                     }
                     free(telemetry_to_send);
+
                 }
+                            ESP_LOGI("111", "4");
+
             }
             telemetry_counter = 0;
         }
 
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(20));
+        // vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(5));
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
