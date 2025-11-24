@@ -1,2 +1,2 @@
-idf_component_register(SRCS "udp_server.c" "ethernet.c" "main.c"
+idf_component_register(SRCS "main.c" "udp_server.c" "ethernet.c"
                        INCLUDE_DIRS ".")
