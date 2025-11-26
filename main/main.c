@@ -4,8 +4,6 @@
 #include "rom/ets_sys.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
 #include "driver/gpio.h"
 #include "driver/gptimer.h"
 #include "driver/ledc.h"
@@ -39,12 +37,6 @@
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #endif
 
-
-typedef struct {
-    int32_t enc_pos;
-    double time_count;
-} t_spi_data;
-
 void nvs_read_config();
 void nvs_write_config();
 char *build_config_string(bool for_nvs);
@@ -55,7 +47,7 @@ char g_ip_addr[64] = DEFAULT_STATIC_IP_ADDR;
 char g_ssid[64] = DEFAULT_WIFI_STA_SSID;
 char g_pass[64] = DEFAULT_WIFI_STA_PASS;
 
-
+// Элементы ПИД
 float pid_kp = DEFAULT_PID_KP;
 float pid_ki = DEFAULT_PID_KI;
 float pid_kd = DEFAULT_PID_KD;
@@ -66,7 +58,7 @@ double pid_ud = 0;
 int32_t pid_r = 0;
 int32_t pid_r_prev = 0;
 
-
+// Данные о положении энкодера
 int32_t enc_goal = DEFAULT_ENC_GOAL;
 int32_t enc_pos = 100;
 int32_t enc_pos_prev = 0;
@@ -76,7 +68,7 @@ double enc_angle_prev = 0;
 double time_count = 0;
 double time_count_prev = 0;
 
-
+//
 int32_t enc_avg_pos = 0;
 int32_t enc_avg_pos_start = 0;
 double enc_avg_vel = 0;
@@ -85,13 +77,12 @@ double enc_avg_vel_th = DEFAULT_ENC_GOAL;
 double enc_delta_vel_max = 100;
 double enc_avg_freq = 0;
 
-
 int timeout_counter = 0;
 int timeout_counter_max = DEFAULT_TIMEOUT_COUNTER_MAX;
 bool flag_auto_timeout_max = false;
 bool flag_timeout = false;
 
-
+// Параметры ШИМ
 unsigned int pwm_freq = 0;
 unsigned int pwm_freq_min = DEFAULT_PWM_FREQ_MIN;
 unsigned int pwm_freq_max_static = DEFAULT_PWM_FREQ_MAX;
@@ -99,7 +90,7 @@ unsigned int pwm_freq_max_dynamic = DEFAULT_PWM_FREQ_MAX;
 bool pwm_flag_paused = false;
 int pwm_dir = 1;
 
-
+// Счётчики
 int log_counter = 0;
 int log_counter_max = DEFAULT_LOG_COUNTER_MAX;
 int telemetry_counter = 0;                   
@@ -107,260 +98,13 @@ int telemetry_counter_max = DEFAULT_TELEMETRY_COUNTER_MAX;
 int avg_counter = 0;
 int avg_counter_max = DEFAULT_TELEMETRY_COUNTER_MAX;
 
-
 QueueHandle_t g_command_queue;
-QueueHandle_t g_spi_data_queue;
-SemaphoreHandle_t g_encoder_mutex;
-SemaphoreHandle_t g_pid_mutex;
-SemaphoreHandle_t g_pwm_mutex;
-SemaphoreHandle_t g_avg_mutex;
 
 bool g_flag_send_telemetry = true;
-struct sockaddr_storage g_last_cmd_source_addr;
-spi_device_handle_t g_spi_handle;
-uint8_t spi_test_buf[8] = "00000000";
 
+struct sockaddr_storage g_last_cmd_source_addr; // TODO: mutex protect
 
-void nvs_read_config();
-void nvs_write_config();
-char *build_config_string(bool for_nvs);
-char *build_telemetry_string();
-void parse_config_string(const char *str);
-void command_processing_task(void *pvParameters);
-void init_pins();
-esp_err_t spi_data_transfer(uint8_t *data, int len);
-
-
-void encoder_reading_task(void *pvParameters)
-{
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    
-    while (1) {
-        esp_err_t ret = spi_data_transfer(spi_test_buf, sizeof(spi_test_buf));
-        
-        if (ret == ESP_OK) {
-            int32_t spi_enc_count = ((uint32_t)spi_test_buf[1] << 16) + ((uint32_t)spi_test_buf[2] << 8) + (uint32_t)spi_test_buf[3];
-            uint32_t spi_time_count = ((uint32_t)spi_test_buf[4] << 24) + ((uint32_t)spi_test_buf[5] << 16) + ((uint32_t)spi_test_buf[6] << 8) + (uint32_t)spi_test_buf[7];
-            
-            if (xSemaphoreTake(g_encoder_mutex, portMAX_DELAY)) {
-                enc_pos_prev = enc_pos;
-                enc_pos = (spi_enc_count - 1048576);
-                time_count_prev = time_count;
-                time_count = (double)spi_time_count * 20 / 1000000000;
-                enc_angle_prev = enc_angle;
-                enc_angle = (((double)spi_enc_count - 1048576) / 4) * 360 / 2048;
-                
-                if (time_count - time_count_prev != 0) 
-                    enc_vel = (enc_pos - enc_pos_prev) / (time_count - time_count_prev);
-                else 
-                    enc_vel = 0;
-                
-                xSemaphoreGive(g_encoder_mutex);
-            }
-            
-            t_spi_data spi_data = {
-                .enc_pos = enc_pos,
-                .time_count = time_count
-            };
-            xQueueSend(g_spi_data_queue, &spi_data, 0);
-        }
-        
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
-    }
-}
-
-void pid_control_task(void *pvParameters)
-{
-    t_spi_data spi_data;
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    
-    while (1) {
-        if (xQueueReceive(g_spi_data_queue, &spi_data, pdMS_TO_TICKS(2))) {
-            if (timeout_counter > timeout_counter_max) {
-                flag_timeout = true;
-                if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
-                    ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
-                    ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
-                    pwm_flag_paused = true;
-                    xSemaphoreGive(g_pwm_mutex);
-                }
-                continue;
-            }
-            
-            if (xSemaphoreTake(g_encoder_mutex, portMAX_DELAY) && 
-                xSemaphoreTake(g_pid_mutex, portMAX_DELAY)) {
-                
-                pid_r = enc_goal - enc_pos;
-                
-                if (!flag_timeout && abs(pid_r) > 0) {
-                    if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
-                        if (pwm_flag_paused) {
-                            ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, DEFAULT_DUTY_RESOLUTION_BIT - 1)));
-                            ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
-                            pwm_flag_paused = false;
-                        }
-                        xSemaphoreGive(g_pwm_mutex);
-                    }
-                    
-                    
-                    pid_up = pid_kp * pid_r;
-                    pid_ui += pid_ki * pid_r;
-                    pid_ui = (pid_ui > 1000) ? 1000 : (pid_ui < -1000) ? -1000 : pid_ui;
-                    pid_ud = pid_kd * (pid_r - pid_r_prev);
-                    pid_u = pid_up + pid_ui + pid_ud;
-                    pid_r_prev = pid_r;
-                    
-                    
-                    if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
-                        pwm_dir = (pid_u >= 0) ? 1 : 0;
-                        pwm_freq = abs((int)pid_u);
-                        pwm_freq = (pwm_freq < pwm_freq_min) ? pwm_freq_min : pwm_freq;
-                        pwm_freq = (pwm_freq > pwm_freq_max_static) ? pwm_freq_max_static : pwm_freq;
-                        
-                        gpio_set_level(PIN_DIR, pwm_dir);
-                        ledc_set_freq(LEDC_HIGH_SPEED_MODE, LEDC_TIMER_0, pwm_freq);
-                        ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
-                        
-                        xSemaphoreGive(g_pwm_mutex);
-                    }
-                    
-                    timeout_counter++;
-                } else if (!flag_timeout) {
-                    // Остановка при достижении цели
-                    if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
-                        if (!pwm_flag_paused) {
-                            ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
-                            ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
-                            pwm_flag_paused = true;
-                            pwm_freq = 0;
-                        }
-                        xSemaphoreGive(g_pwm_mutex);
-                    }
-                    timeout_counter = 0;
-                    avg_counter = 0;
-                }
-                
-                xSemaphoreGive(g_pid_mutex);
-                xSemaphoreGive(g_encoder_mutex);
-            }
-        }
-        
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
-    }
-}
-
-
-void averaging_task(void *pvParameters)
-{
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    
-    while (1) {
-        if (xSemaphoreTake(g_avg_mutex, portMAX_DELAY) &&
-            xSemaphoreTake(g_encoder_mutex, portMAX_DELAY) &&
-            xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
-            
-            if (avg_counter++ >= avg_counter_max) {
-                if (time_count - avg_time_count_start != 0) {
-                    enc_avg_vel = (enc_pos - enc_avg_pos_start) / (time_count - avg_time_count_start);
-                    enc_avg_freq = enc_avg_vel_th;
-                } else {
-                    enc_avg_vel = 0;
-                    enc_avg_freq = 0;
-                }
-                
-                enc_avg_vel_th = ((double)8192 / 25000 * pwm_freq);
-                enc_avg_vel_th = (pwm_dir == 1) ? enc_avg_vel_th : -enc_avg_vel_th;
-                
-                avg_time_count_start = time_count;
-                enc_avg_pos_start = enc_pos;
-                avg_counter = 0;
-            }
-            
-            xSemaphoreGive(g_pwm_mutex);
-            xSemaphoreGive(g_encoder_mutex);
-            xSemaphoreGive(g_avg_mutex);
-        }
-        
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
-    }
-}
-
-void logging_task(void *pvParameters)
-{
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    
-    while (1) {
-        if (log_counter++ >= log_counter_max) {
-            ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", 
-                    spi_test_buf[0], spi_test_buf[1], spi_test_buf[2], spi_test_buf[3], 
-                    spi_test_buf[4], spi_test_buf[5], spi_test_buf[6], spi_test_buf[7]);
-            ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, err=%d", enc_pos, enc_goal, pid_r);
-            log_counter = 0;
-        }
-        
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
-    }
-}
-
-void telemetry_task(void *pvParameters)
-{
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-    
-    while (1) {
-        if (telemetry_counter++ >= telemetry_counter_max) {
-            if (g_flag_send_telemetry) {
-                char *telemetry_to_send = build_telemetry_string();
-                if (telemetry_to_send) {
-                    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-                    if (sock >= 0) {
-                        int err = sendto(sock, telemetry_to_send, strlen(telemetry_to_send), 0,
-                                         (struct sockaddr *)&g_last_cmd_source_addr, sizeof(struct sockaddr));
-                        if (err < 0) {
-                            ESP_LOGW(TAG, "Failed to send telemetry: errno %d", errno);
-                        }
-                        close(sock);
-                    }
-                    free(telemetry_to_send);
-                }
-            }
-            telemetry_counter = 0;
-        }
-        
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
-    }
-}
-
-void init_mutexes()
-{
-    g_encoder_mutex = xSemaphoreCreateMutex();
-    g_pid_mutex = xSemaphoreCreateMutex();
-    g_pwm_mutex = xSemaphoreCreateMutex();
-    g_avg_mutex = xSemaphoreCreateMutex();
-    
-    assert(g_encoder_mutex != NULL);
-    assert(g_pid_mutex != NULL);
-    assert(g_pwm_mutex != NULL);
-    assert(g_avg_mutex != NULL);
-}
-
-
-esp_err_t spi_data_transfer(uint8_t *data, int len)
-{
-    esp_err_t ret;
-    spi_transaction_t t;
-    memset(&t, 0, sizeof(t));
-    t.flags = 0;
-    t.cmd = 0x01;
-    t.addr = 0;
-    t.length = len * 8;
-    t.tx_buffer = NULL;
-    t.rxlength = t.length;
-    t.rx_buffer = data;
-    t.user = 0;
-    ret = spi_device_polling_transmit(g_spi_handle, &t);
-    return ret;
-}
-
+gptimer_handle_t g_gptimer;
 
 esp_err_t data(spi_device_handle_t spi, uint8_t *data, int len)
 {
@@ -371,7 +115,7 @@ esp_err_t data(spi_device_handle_t spi, uint8_t *data, int len)
     t.cmd = 0x01;
     t.addr = 0;
     t.length = len * 8;
-    t.tx_buffer = 0;
+    t.tx_buffer = NULL;
     t.rxlength = t.length;
     t.rx_buffer = data;
     t.user = 0;
@@ -397,6 +141,7 @@ void append_telemetry_data(cJSON *json)
 char *build_telemetry_string()
 {
     cJSON *json = cJSON_CreateObject();
+
     append_telemetry_data(json);
 
     char *str = cJSON_Print(json);
@@ -424,9 +169,9 @@ char *build_config_string(bool for_nvs)
     cJSON_AddNumberToObject(json, STR_TELEMETRY_COUNTER_MAX, telemetry_counter_max);
     cJSON_AddNumberToObject(json, "timeout_counter_max", timeout_counter_max);
 
+
     if (!for_nvs)
     {
-        
     }
 
     char *str = cJSON_Print(json);
@@ -569,6 +314,15 @@ void command_processing_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
+void IRAM_ATTR sense_stop_isr(void *arg)
+{
+    BaseType_t flag_yield = 0;
+
+    xTaskNotifyFromISR((TaskHandle_t)arg, 0, 0, &flag_yield);
+
+    portYIELD_FROM_ISR(flag_yield);
+}
+
 void init_pins()
 {
     gpio_reset_pin(PIN_PUL);
@@ -579,8 +333,20 @@ void init_pins()
     gpio_set_direction(PIN_DIR, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_DIR, 0);
 
+    // gpio_reset_pin(PIN_STOP);
+    // gpio_set_direction(PIN_STOP, GPIO_MODE_INPUT);
+    // gpio_set_pull_mode(PIN_STOP, GPIO_PULLUP_ONLY);
+
+    // gpio_reset_pin(PIN_LED);
+    // gpio_set_direction(PIN_LED, GPIO_MODE_OUTPUT);
+    // gpio_set_level(PIN_LED, 1);
+
     // install gpio isr service
     gpio_install_isr_service(0);
+
+    // hook isr handler for specific gpio pin
+    // gpio_isr_handler_add(PIN_STOP, sense_stop_isr, xTaskGetCurrentTaskHandle());
+    // gpio_set_intr_type(PIN_STOP, GPIO_INTR_ANYEDGE);
 }
 
 void nvs_read_config()
@@ -664,12 +430,13 @@ void nvs_write_config()
     }
 }
 
+        uint8_t spi_test_buf[8] = "00000000";
+
 void app_main(void)
 {
     init_pins();
-    init_mutexes();
 
-    // Инициализация SPI
+    TickType_t xLastWakeTime = xTaskGetTickCount();
     esp_err_t ret;
     spi_device_handle_t spi;
     spi_bus_config_t buscfg = {
@@ -678,9 +445,7 @@ void app_main(void)
         .sclk_io_num = PIN_NUM_CLK,
         .quadhd_io_num = -1,
         .quadwp_io_num = -1,
-        .max_transfer_sz = 1
-    };
-    
+        .max_transfer_sz = 1};
     spi_device_interface_config_t devcfg = {
         #ifdef CONFIG_OVERCLOCK
             .clock_speed_hz = 26 * 1000 * 1000,
@@ -693,7 +458,6 @@ void app_main(void)
         .command_bits = 8,
         .address_bits = 0,
         .dummy_bits = 0,
-
     };
     ret = spi_bus_initialize(HOST, &buscfg, SPI_DMA_CH_AUTO);
     ESP_ERROR_CHECK(ret);
@@ -709,63 +473,190 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     nvs_read_config();
-    
-    // Инициализация сети
-    t_eth_config config = {
-        .ip = g_ip_addr, 
-        .pass = g_pass, 
-        .ssid = g_ssid, 
-        .use_eth = USE_COMMM_ETHERNET, 
-        .use_wifi_ap = USE_COMMM_WIFI_AP, 
-        .use_wifi_sta = USE_COMMM_WIFI_STA
-    };
+    t_eth_config config = {.ip = g_ip_addr, .pass = g_pass, .ssid = g_ssid, .use_eth = USE_COMMM_ETHERNET, .use_wifi_ap = USE_COMMM_WIFI_AP, .use_wifi_sta = USE_COMMM_WIFI_STA};
     eth_start(config);
 
-    // Создание очередей
     g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
-    g_spi_data_queue = xQueueCreate(10, sizeof(t_spi_data));
     assert(g_command_queue != NULL);
-    assert(g_spi_data_queue != NULL);
 
-    // Инициализация ШИМ
-    ledc_timer_config_t ledc_timer = {
+    if (USE_COMMM_ETHERNET || USE_COMMM_WIFI_AP || USE_COMMM_WIFI_STA)
+    {
+        xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 1, NULL);
+        xTaskCreate(udp_server_task, "udp_server", 4096, (void *)AF_INET, 1, NULL);
+    }
+
+    // TickType_t xLastWakeTime = xTaskGetTickCount();
+
+    ledc_timer_config_t ledc_timer1 = {
         .speed_mode = LEDC_HIGH_SPEED_MODE,
         .duty_resolution = DEFAULT_DUTY_RESOLUTION,
         .timer_num = LEDC_TIMER_0,
         .freq_hz = pwm_freq_min,
-        .clk_cfg = LEDC_AUTO_CLK
-    };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
-    
-    ledc_channel_config_t ledc_channel = {
+        .clk_cfg = LEDC_AUTO_CLK};
+    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer1));
+
+    ledc_channel_config_t ledc_channel1 = {
         .speed_mode = LEDC_HIGH_SPEED_MODE,
         .channel = LEDC_CHANNEL_0,
         .timer_sel = LEDC_TIMER_0,
         .intr_type = LEDC_INTR_DISABLE,
         .gpio_num = PIN_PUL,
         .duty = (int)(pow(2, DEFAULT_DUTY_RESOLUTION_BIT - 1)),
-        .hpoint = 0
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
+        .hpoint = 0};
+    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel1));
 
-    // Создание задач
-    xTaskCreate(encoder_reading_task, "encoder_reader", 4096, NULL, 2, NULL);
-    xTaskCreate(pid_control_task, "pid_controller", 4096, NULL, 2, NULL);
-    xTaskCreate(averaging_task, "averaging", 2048, NULL, 1, NULL);
-    xTaskCreate(logging_task, "logging", 2048, NULL, 1, NULL);
-    xTaskCreate(telemetry_task, "telemetry", 2048, NULL, 1, NULL);
-
-    // Сетевые задачи
-    if (USE_COMMM_ETHERNET || USE_COMMM_WIFI_AP || USE_COMMM_WIFI_STA)
-    {
-        xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 2, NULL);
-        xTaskCreate(udp_server_task, "udp_server", 4096, (void *)AF_INET, 2, NULL);
-    }
-
-    ESP_LOGI(TAG, "111");
+    ESP_LOGI(TAG, "PID control task started");
 
     while (1)
     {
-      vTaskDelay(pdMS_TO_TICKS(10));
+        if (timeout_counter > timeout_counter_max)
+        {
+            flag_timeout = true;
+            ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
+            ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
+            pwm_flag_paused = true;
+            ESP_LOGI("AAAAA", "TIMEOUT");
+        }
+        ret = data(spi, spi_test_buf, sizeof(spi_test_buf));
+
+        if (ret == ESP_OK)
+        {
+            int32_t spi_enc_count = ((uint32_t)spi_test_buf[1] << 16) + ((uint32_t)spi_test_buf[2] << 8) + (uint32_t)spi_test_buf[3];
+            uint32_t spi_time_count = ((uint32_t)spi_test_buf[4] << 24) + ((uint32_t)spi_test_buf[5] << 16) + ((uint32_t)spi_test_buf[6] << 8) + (uint32_t)spi_test_buf[7];
+            ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", spi_test_buf[0],spi_test_buf[1],spi_test_buf[2],spi_test_buf[3],spi_test_buf[4],spi_test_buf[5],spi_test_buf[6],spi_test_buf[7]);
+            enc_pos_prev = enc_pos;
+            enc_pos = (spi_enc_count - 1048576);
+            time_count_prev = time_count;
+            time_count = (double)spi_time_count * 20 / 1000000000;
+            enc_angle_prev = enc_angle;
+            enc_angle = (((double)spi_enc_count - 1048576) / 4) * 360 / 2048;
+            
+            ESP_LOGI("111", "1");
+            if (time_count - time_count_prev != 0) enc_vel = (enc_pos - enc_pos_prev) / (time_count - time_count_prev);
+            else enc_vel = 0;
+
+            if (avg_counter++ >= avg_counter_max)
+            {
+                            ESP_LOGI("111", "2");
+
+                if (time_count - avg_time_count_start != 0)
+                {
+                    enc_avg_vel = (enc_pos - enc_avg_pos_start) / (time_count - avg_time_count_start);
+                    enc_avg_freq = enc_avg_vel_th;
+                }
+                else
+                {
+                    enc_avg_vel = 0;
+                    enc_avg_freq = 0;
+                }
+                enc_avg_vel_th = ((double)8192 / 25000 * pwm_freq);
+                enc_avg_vel_th = (pwm_dir == 1) ? enc_avg_vel_th : -enc_avg_vel_th;
+                ///ESP_LOGI("ttt", "enc_pos = %i, enc_avg_pos_start = %i, enc_avg_vel = %.4f", enc_pos, enc_avg_pos_start, enc_avg_vel);
+                //ESP_LOGI("yyy", "pwm_freq = %i, enc_avg_freq = %.4f, %.4f", pwm_freq, enc_avg_freq, (time_count - avg_time_count_start));
+                avg_time_count_start = time_count;
+                enc_avg_pos_start = enc_pos;
+                
+                //enc_avg_pos = 0;
+                //enc_avg_vel = 0;
+                //enc_avg_vel_th = 0;
+                avg_counter = 0;
+            }
+            // ESP_LOGI("flag, enc_pos, angle, time_count, enc_vel", "%i %i %.2f %.2f %.2f", spi_test_buf[0] / 128, enc_pos, enc_angle, time_count, enc_vel);
+        }
+
+        pid_r = enc_goal - enc_pos;
+        ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, pid_r=%i", enc_pos, enc_goal, pid_r);
+        if (!flag_timeout)
+        {
+            if (abs(pid_r) > 0)
+            {
+                if (pwm_flag_paused)
+                {
+                    ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, DEFAULT_DUTY_RESOLUTION_BIT - 1)));
+                    ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
+                    pwm_flag_paused = false;
+                    ESP_LOGI(TAG, "Timer resumed");
+                }
+
+                            ESP_LOGI("111", "3");
+
+                pid_up = pid_kp * pid_r;
+                pid_ui += pid_ki * pid_r;
+                pid_ui = (pid_ui > 1000) ? 1000 : (pid_ui < -1000) ? -1000 : pid_ui;
+                pid_ud = pid_kd * (pid_r - pid_r_prev);
+
+                pid_u = pid_up + pid_ui + pid_ud;
+                pid_r_prev = pid_r;
+
+                pwm_dir = (pid_u >= 0) ? 1 : 0;
+                pwm_freq = abs((int)pid_u);
+                pwm_freq = (pwm_freq < pwm_freq_min) ? pwm_freq_min : pwm_freq;
+                pwm_freq = (pwm_freq > pwm_freq_max_static) ? pwm_freq_max_static : pwm_freq;
+
+                //enc_avg_pos += enc_pos;
+                //enc_avg_vel += enc_pos - enc_pos_prev;
+                ESP_LOGI("ddd", "enc_avg_vel_th = %.4f, freq = %i", enc_avg_vel_th, pwm_freq);
+
+                gpio_set_level(PIN_DIR, pwm_dir);
+
+                ledc_set_freq(LEDC_HIGH_SPEED_MODE, LEDC_TIMER_0, pwm_freq);
+                ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
+                timeout_counter++;
+            }
+            else if (!pwm_flag_paused)
+            {
+                // Устанавливаем скважность 0% - нет импульсов, но таймер работает
+                ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
+                ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
+                pwm_flag_paused = true;
+                ESP_LOGI(TAG, "Timer paused (duty=0)");
+                pwm_freq = 0;
+                timeout_counter = 0;
+                avg_counter = 0;
+            }
+        }
+
+        if (log_counter++ >= log_counter_max)
+        {
+            ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", spi_test_buf[0], spi_test_buf[1], 
+                spi_test_buf[2], spi_test_buf[3], spi_test_buf[4], spi_test_buf[5], spi_test_buf[6], spi_test_buf[7]);
+            ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, err=%d\n", enc_pos, enc_goal, pid_r);
+            log_counter = 0;
+        }
+
+        if (telemetry_counter++ >= telemetry_counter_max)
+        {
+            if (g_flag_send_telemetry)
+            {
+                char *telemetry_to_send = build_telemetry_string();
+                if (telemetry_to_send)
+                {
+                    // Отправка телеметрии на последний известный адрес
+                    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+                    if (sock >= 0)
+                    {
+                        int err = sendto(sock, telemetry_to_send, strlen(telemetry_to_send), 0,
+                                         (struct sockaddr *)&g_last_cmd_source_addr, sizeof(struct sockaddr));
+                        if (err < 0)
+                        {
+                            ESP_LOGW(TAG, "Failed to send telemetry: errno %d", errno);
+                        }
+                        else
+                        {
+                            ESP_LOGI(TAG, "Telemetry sent: enc_pos=%d", enc_pos);
+                        }
+                        close(sock);
+                    }
+                    free(telemetry_to_send);
+
+                }
+                            ESP_LOGI("111", "4");
+
+            }
+            telemetry_counter = 0;
+        }
+
+        // vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(5));
+        vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
