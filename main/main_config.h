@@ -43,7 +43,6 @@
 #define STR_CMD_READ_FLASH      "restore_from_flash"
 #define STR_CMD_WRITE_FLASH     "save_to_flash"
 
-<<<<<<< HEAD
 #define PIN_PUL                 (5)
 #define PIN_DIR                 (2)
 //#define PIN_STOP                (15)
@@ -122,23 +121,3 @@
 #elif (DEFAULT_DUTY_RESOLUTION_BIT == 20) 
     #define DEFAULT_DUTY_RESOLUTION LEDC_TIMER_20_BIT
 #endif
-=======
-#define PIN_STEP                (32)
-#define PIN_DIR                 (33)
-#define PIN_STOP                (15)
-#define PIN_LED                 (2)
-#define PIN_A                   (25)
-#define PIN_B                   (26)
-
-#define HOST            SPI3_HOST
-#define PIN_NUM_MISO    19
-#define PIN_NUM_MOSI    23
-#define PIN_NUM_CLK     18
-#define PIN_NUM_SS      5
-
-#define DUTY_RESOLUTION_BIT     (8)
-#define DEFAULT_PAUSE           (100)
-#define DEFAULT_CALIBRATION_TIMEOUT (100)
-#define GRAPH_ARRAY_SIZE        (200)
-
->>>>>>> da805cefbb69351bfc79f9d5cfa801025b49df6f
