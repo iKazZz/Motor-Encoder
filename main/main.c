@@ -48,6 +48,13 @@ char g_ssid[64] = DEFAULT_WIFI_STA_SSID;
 char g_pass[64] = DEFAULT_WIFI_STA_PASS;
 
 QueueHandle_t g_command_queue;
+QueueHandle_t g_spi_data_queue;
+SemaphoreHandle_t g_encoder_mutex;
+SemaphoreHandle_t g_pid_mutex;
+SemaphoreHandle_t g_pwm_mutex;
+SemaphoreHandle_t g_avg_mutex;
+
+QueueHandle_t g_command_queue;
 
 bool g_flag_send_telemetry = true;
 
@@ -176,11 +183,32 @@ void command_processing_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
+void myTask(void *pvParameters)
+{
+    while(1)
+    {
+        ESP_LOGI("myTask", "aboba");
+        ESP_LOGI("myTask", "fifa");
+    } 
+    
+    vTaskDelete(NULL);
+}
+
+void delayTask(void *pvParameters)
+{
+    while(1)
+    {
+        ESP_LOGI("main", "delay");
+        vTaskDelay(100);
+    } 
+    vTaskDelete(NULL);
+}
+
 void init_pins()
 {
-    gpio_reset_pin(PIN_PUL);
-    gpio_set_direction(PIN_PUL, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_PUL, 0);
+    gpio_reset_pin(PIN_LED);
+    gpio_set_direction(PIN_LED, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_LED, 0);
 
 }
 
@@ -265,30 +293,50 @@ void nvs_write_config()
     }
 }
 
+void encoder_reading_task(void *pvParameters)
+{
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    
+    while (1) {
+
+        if (xSemaphoreTake(g_encoder_mutex, portMAX_DELAY)) {    
+            xSemaphoreGive(g_encoder_mutex);
+            
+            //xQueueSend(g_spi_data_queue, &spi_data, 0);
+        }
+        
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
+    }
+}
+
 void app_main(void)
 {
     init_pins();
 
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
-    {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        err = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(err);
+    // esp_err_t err = nvs_flash_init();
+    // if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    // {
+    //     ESP_ERROR_CHECK(nvs_flash_erase());
+    //     err = nvs_flash_init();
+    // }
+    // ESP_ERROR_CHECK(err);
 
-    nvs_read_config();
-    t_eth_config config = {.ip = g_ip_addr, .pass = g_pass, .ssid = g_ssid, .use_eth = USE_COMMM_ETHERNET, .use_wifi_ap = USE_COMMM_WIFI_AP, .use_wifi_sta = USE_COMMM_WIFI_STA};
-    eth_start(config);
+    // nvs_read_config();
+    // t_eth_config config = {.ip = g_ip_addr, .pass = g_pass, .ssid = g_ssid, .use_eth = USE_COMMM_ETHERNET, .use_wifi_ap = USE_COMMM_WIFI_AP, .use_wifi_sta = USE_COMMM_WIFI_STA};
+    // eth_start(config);
 
-    g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
-    assert(g_command_queue != NULL);
+    // g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
+    // assert(g_command_queue != NULL);
 
     if (USE_COMMM_ETHERNET || USE_COMMM_WIFI_AP || USE_COMMM_WIFI_STA)
     {
-        xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 1, NULL);
-        xTaskCreate(udp_server_task, "udp_server", 4096, (void *)AF_INET, 1, NULL);
+        //xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 1, NULL);
+        //xTaskCreate(udp_server_task, "udp_server", 4096, (void *)AF_INET, 1, NULL);
+        
+        
     }
+    xTaskCreate(myTask, "myTask", 4096, (void *)AF_INET, 0, NULL);
+    xTaskCreate(delayTask, "delayTask", 4096, (void *)AF_INET, 1, NULL);
 
     while (1)
     {

@@ -43,10 +43,8 @@
 #define STR_CMD_READ_FLASH      "restore_from_flash"
 #define STR_CMD_WRITE_FLASH     "save_to_flash"
 
-#define PIN_PUL                 (5)
-#define PIN_DIR                 (2)
-//#define PIN_STOP                (15)
-//#define PIN_LED                 (2)
+#define PIN_LED                (2)
+
 
 #if (DEFAULT_DUTY_RESOLUTION_BIT == 1) 
     #define DEFAULT_DUTY_RESOLUTION LEDC_TIMER_1_BIT 
