@@ -48,38 +48,6 @@
 //#define PIN_STOP                (15)
 //#define PIN_LED                 (2)
 
-#define HOST                    SPI2_HOST
-#define PIN_NUM_MISO            (12)
-#define PIN_NUM_MOSI            (13)
-#define PIN_NUM_CLK             (14)
-#define PIN_NUM_SS              (15)
-
-#define DEFAULT_PID_KP          (1)
-#define DEFAULT_PID_KI          (0)
-#define DEFAULT_PID_KD          (0)
-
-#define STR_PID_KP              "pid_kp"
-#define STR_PID_KI              "pid_ki"
-#define STR_PID_KD              "pid_kd"
-
-#define GRAPH_ARRAY_SIZE        (200)
-
-#define DEFAULT_DUTY_RESOLUTION_BIT     (4)
-#define DEFAULT_TELEMETRY_COUNTER_MAX   (5) // 1 тик = 10 мс
-#define DEFAULT_LOG_COUNTER_MAX         (200)
-#define DEFAULT_PWM_FREQ_MIN            (200)
-#define DEFAULT_PWM_FREQ_MAX            (7000)
-#define DEFAULT_ENC_GOAL                (0)
-#define DEFAULT_TIMEOUT_COUNTER_MAX     (10000)
-
-#define STR_DUTY_RESOLUTION_BIT         "duty_resolution_bit"
-#define STR_TELEMETRY_COUNTER_MAX       "telemetry_counter_max"
-#define STR_LOG_COUNTER_MAX             "log_counter_max"
-#define STR_PWM_FREQ_MIN                "pwm_freq_min"
-#define STR_PWM_FREQ_MAX_STATIC         "pwm_freq_max_static"
-#define STR_PWM_FREQ_MAX_DYNAMIC        "pwm_freq_max_dynamic"
-#define STR_ENC_GOAL                    "enc_goal"
-
 #if (DEFAULT_DUTY_RESOLUTION_BIT == 1) 
     #define DEFAULT_DUTY_RESOLUTION LEDC_TIMER_1_BIT 
 #elif (DEFAULT_DUTY_RESOLUTION_BIT == 2) 
