@@ -507,6 +507,7 @@ void app_main(void)
         .intr_type = LEDC_INTR_DISABLE,
         .gpio_num = PIN_PUL,
         .duty = (int)(pow(2, DEFAULT_DUTY_RESOLUTION_BIT - 1)),
+        // .duty = 0,
         .hpoint = 0};
     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel1));
 
@@ -580,16 +581,7 @@ void app_main(void)
         {
             if (abs(pid_r) > 0)
             {
-                if (pwm_flag_paused)
-                {
-                    ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, DEFAULT_DUTY_RESOLUTION_BIT - 1)));
-                    ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
-                    pwm_flag_paused = false;
-                    ESP_LOGI(TAG, "Timer resumed");
-                }
-
-                            // ESP_LOGI("111", "3");
-
+                                    // ESP_LOGI("111", "3");
                 pid_up = pid_kp * pid_r;
                 pid_ui += pid_ki * pid_r;
                 pid_ui = (pid_ui > 1000) ? 1000 : (pid_ui < -1000) ? -1000 : pid_ui;
@@ -608,6 +600,13 @@ void app_main(void)
                 // ESP_LOGI("ddd", "enc_avg_vel_th = %.4f, freq = %i", enc_avg_vel_th, pwm_freq);
 
                 gpio_set_level(PIN_DIR, pwm_dir);
+
+                if (pwm_flag_paused)
+                {
+                    ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, DEFAULT_DUTY_RESOLUTION_BIT - 1)));
+                    pwm_flag_paused = false;
+                    ESP_LOGI(TAG, "Timer resumed");
+                }
 
                 ledc_set_freq(LEDC_HIGH_SPEED_MODE, LEDC_TIMER_0, pwm_freq);
                 ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
