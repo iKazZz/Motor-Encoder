@@ -679,7 +679,6 @@ void app_main(void)
 
     // Инициализация SPI
     esp_err_t ret;
-    spi_device_handle_t spi;
     spi_bus_config_t buscfg = {
         .miso_io_num = PIN_NUM_MISO,
         .mosi_io_num = PIN_NUM_MOSI,
@@ -705,7 +704,7 @@ void app_main(void)
     };
     ret = spi_bus_initialize(HOST, &buscfg, SPI_DMA_CH_AUTO);
     ESP_ERROR_CHECK(ret);
-    ret = spi_bus_add_device(HOST, &devcfg, &spi);
+    ret = spi_bus_add_device(HOST, &devcfg, &g_spi_handle);
     ESP_ERROR_CHECK(ret);
 
     esp_err_t err = nvs_flash_init();
