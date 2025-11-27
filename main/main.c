@@ -60,7 +60,7 @@ int32_t pid_r_prev = 0;
 
 // Данные о положении энкодера
 int32_t enc_goal = DEFAULT_ENC_GOAL;
-int32_t enc_pos = 100;
+int32_t enc_pos = 0;
 int32_t enc_pos_prev = 0;
 double enc_vel = 200;
 double enc_angle = 0;
@@ -106,14 +106,21 @@ struct sockaddr_storage g_last_cmd_source_addr; // TODO: mutex protect
 
 gptimer_handle_t g_gptimer;
 
-esp_err_t data(spi_device_handle_t spi, uint8_t *data, int len)
+esp_err_t data(spi_device_handle_t spi, uint8_t *data, int len, bool flag_pos)
 {
     esp_err_t ret;
     spi_transaction_t t;
     memset(&t, 0, sizeof(t));
     t.flags = 0;
-    t.cmd = 0x01;
     t.addr = 0;
+    if(flag_pos)
+    {
+        t.cmd = (1 << 7) + 8;
+    }
+    else
+    {
+        t.cmd = (1 << 7) + 9;
+    }
     t.length = len * 8;
     t.tx_buffer = NULL;
     t.rxlength = t.length;
@@ -430,8 +437,6 @@ void nvs_write_config()
     }
 }
 
-        uint8_t spi_test_buf[8] = "00000000";
-
 void app_main(void)
 {
     init_pins();
@@ -509,6 +514,8 @@ void app_main(void)
 
     while (1)
     {
+        uint8_t spi_test_buf[4] = "0000";
+        uint8_t spi_test_buf1[4] = "0000";
         if (timeout_counter > timeout_counter_max)
         {
             flag_timeout = true;
@@ -517,13 +524,16 @@ void app_main(void)
             pwm_flag_paused = true;
             ESP_LOGI("AAAAA", "TIMEOUT");
         }
-        ret = data(spi, spi_test_buf, sizeof(spi_test_buf));
+        ret = data(spi, spi_test_buf, sizeof(spi_test_buf), true);
 
         if (ret == ESP_OK)
-        {
+        {   
             int32_t spi_enc_count = ((uint32_t)spi_test_buf[1] << 16) + ((uint32_t)spi_test_buf[2] << 8) + (uint32_t)spi_test_buf[3];
-            uint32_t spi_time_count = ((uint32_t)spi_test_buf[4] << 24) + ((uint32_t)spi_test_buf[5] << 16) + ((uint32_t)spi_test_buf[6] << 8) + (uint32_t)spi_test_buf[7];
-            ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", spi_test_buf[0],spi_test_buf[1],spi_test_buf[2],spi_test_buf[3],spi_test_buf[4],spi_test_buf[5],spi_test_buf[6],spi_test_buf[7]);
+            // ESP_LOGI("buf", "%i %i %i %i", spi_test_buf[0], spi_test_buf[1], spi_test_buf[2], spi_test_buf[3]);
+            ESP_LOGI("MISO_pos", "%02X %02X %02X %02X", spi_test_buf[0],spi_test_buf[1],spi_test_buf[2],spi_test_buf[3]);
+            ret = data(spi, spi_test_buf1, sizeof(spi_test_buf1), false);
+            uint32_t spi_time_count = ((uint32_t)spi_test_buf1[0] << 24) + ((uint32_t)spi_test_buf1[1] << 16) + ((uint32_t)spi_test_buf1[2] << 8) + (uint32_t)spi_test_buf1[3];
+            ESP_LOGI("MISO_time", "%02X %02X %02X %02X \n", spi_test_buf1[0],spi_test_buf1[1],spi_test_buf1[2],spi_test_buf1[3]);
             enc_pos_prev = enc_pos;
             enc_pos = (spi_enc_count - 1048576);
             time_count_prev = time_count;
@@ -531,13 +541,13 @@ void app_main(void)
             enc_angle_prev = enc_angle;
             enc_angle = (((double)spi_enc_count - 1048576) / 4) * 360 / 2048;
             
-            ESP_LOGI("111", "1");
+            //ESP_LOGI("111", "1");
             if (time_count - time_count_prev != 0) enc_vel = (enc_pos - enc_pos_prev) / (time_count - time_count_prev);
             else enc_vel = 0;
 
             if (avg_counter++ >= avg_counter_max)
             {
-                            ESP_LOGI("111", "2");
+                            //ESP_LOGI("111", "2");
 
                 if (time_count - avg_time_count_start != 0)
                 {
@@ -578,7 +588,7 @@ void app_main(void)
                     ESP_LOGI(TAG, "Timer resumed");
                 }
 
-                            ESP_LOGI("111", "3");
+                            // ESP_LOGI("111", "3");
 
                 pid_up = pid_kp * pid_r;
                 pid_ui += pid_ki * pid_r;
@@ -595,7 +605,7 @@ void app_main(void)
 
                 //enc_avg_pos += enc_pos;
                 //enc_avg_vel += enc_pos - enc_pos_prev;
-                ESP_LOGI("ddd", "enc_avg_vel_th = %.4f, freq = %i", enc_avg_vel_th, pwm_freq);
+                // ESP_LOGI("ddd", "enc_avg_vel_th = %.4f, freq = %i", enc_avg_vel_th, pwm_freq);
 
                 gpio_set_level(PIN_DIR, pwm_dir);
 
@@ -618,8 +628,6 @@ void app_main(void)
 
         if (log_counter++ >= log_counter_max)
         {
-            ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", spi_test_buf[0], spi_test_buf[1], 
-                spi_test_buf[2], spi_test_buf[3], spi_test_buf[4], spi_test_buf[5], spi_test_buf[6], spi_test_buf[7]);
             ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, err=%d\n", enc_pos, enc_goal, pid_r);
             log_counter = 0;
         }
@@ -650,7 +658,7 @@ void app_main(void)
                     free(telemetry_to_send);
 
                 }
-                            ESP_LOGI("111", "4");
+                            // ESP_LOGI("111", "4");
 
             }
             telemetry_counter = 0;
