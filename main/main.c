@@ -118,7 +118,7 @@ SemaphoreHandle_t g_avg_mutex;
 bool g_flag_send_telemetry = true;
 struct sockaddr_storage g_last_cmd_source_addr;
 spi_device_handle_t g_spi_handle;
-uint8_t spi_test_buf[8] = "00000000";
+uint8_t spi_test_buf[4] = "0000";
 
 
 void nvs_read_config();
@@ -128,7 +128,7 @@ char *build_telemetry_string();
 void parse_config_string(const char *str);
 void command_processing_task(void *pvParameters);
 void init_pins();
-esp_err_t spi_data_transfer(uint8_t *data, int len);
+esp_err_t spi_data_transfer(uint8_t *data, int len, bool flag_pos);
 
 
 void encoder_reading_task(void *pvParameters)
@@ -136,11 +136,12 @@ void encoder_reading_task(void *pvParameters)
     TickType_t xLastWakeTime = xTaskGetTickCount();
     
     while (1) {
-        esp_err_t ret = spi_data_transfer(spi_test_buf, sizeof(spi_test_buf));
+        esp_err_t ret = spi_data_transfer(spi_test_buf, sizeof(spi_test_buf), true);
         
         if (ret == ESP_OK) {
             int32_t spi_enc_count = ((uint32_t)spi_test_buf[1] << 16) + ((uint32_t)spi_test_buf[2] << 8) + (uint32_t)spi_test_buf[3];
-            uint32_t spi_time_count = ((uint32_t)spi_test_buf[4] << 24) + ((uint32_t)spi_test_buf[5] << 16) + ((uint32_t)spi_test_buf[6] << 8) + (uint32_t)spi_test_buf[7];
+            ret = spi_data_transfer(spi_test_buf, sizeof(spi_test_buf), false);
+            uint32_t spi_time_count = ((uint32_t)spi_test_buf[0] << 24) + ((uint32_t)spi_test_buf[1] << 16) + ((uint32_t)spi_test_buf[2] << 8) + (uint32_t)spi_test_buf[3];
             
             if (xSemaphoreTake(g_encoder_mutex, portMAX_DELAY)) {
                 enc_pos_prev = enc_pos;
@@ -291,9 +292,9 @@ void logging_task(void *pvParameters)
     
     while (1) {
         if (log_counter++ >= log_counter_max) {
-            ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", 
-                    spi_test_buf[0], spi_test_buf[1], spi_test_buf[2], spi_test_buf[3], 
-                    spi_test_buf[4], spi_test_buf[5], spi_test_buf[6], spi_test_buf[7]);
+            // ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", 
+            //         spi_test_buf[0], spi_test_buf[1], spi_test_buf[2], spi_test_buf[3], 
+            //         spi_test_buf[4], spi_test_buf[5], spi_test_buf[6], spi_test_buf[7]);
             ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, err=%d", enc_pos, enc_goal, pid_r);
             log_counter = 0;
         }
@@ -344,13 +345,20 @@ void init_mutexes()
 }
 
 
-esp_err_t spi_data_transfer(uint8_t *data, int len)
+esp_err_t spi_data_transfer(uint8_t *data, int len, bool flag_pos)
 {
     esp_err_t ret;
     spi_transaction_t t;
     memset(&t, 0, sizeof(t));
     t.flags = 0;
-    t.cmd = 0x01;
+    if(flag_pos)
+    {
+        t.cmd = (1 << 7) + 8;
+    }
+    else
+    {
+        t.cmd = (1 << 7) + 9;
+    }
     t.addr = 0;
     t.length = len * 8;
     t.tx_buffer = NULL;
@@ -362,23 +370,23 @@ esp_err_t spi_data_transfer(uint8_t *data, int len)
 }
 
 
-esp_err_t data(spi_device_handle_t spi, uint8_t *data, int len)
-{
-    esp_err_t ret;
-    spi_transaction_t t;
-    memset(&t, 0, sizeof(t));
-    t.flags = 0;
-    t.cmd = 0x01;
-    t.addr = 0;
-    t.length = len * 8;
-    t.tx_buffer = 0;
-    t.rxlength = t.length;
-    t.rx_buffer = data;
-    t.user = 0;
-    ret = spi_device_polling_transmit(spi, &t);
-    // assert(ret == ESP_OK);
-    return ret;
-}
+// esp_err_t data(spi_device_handle_t spi, uint8_t *data, int len)
+// {
+//     esp_err_t ret;
+//     spi_transaction_t t;
+//     memset(&t, 0, sizeof(t));
+//     t.flags = 0;
+//     t.cmd = 0x01;
+//     t.addr = 0;
+//     t.length = len * 8;
+//     t.tx_buffer = 0;
+//     t.rxlength = t.length;
+//     t.rx_buffer = data;
+//     t.user = 0;
+//     ret = spi_device_polling_transmit(spi, &t);
+//     // assert(ret == ESP_OK);
+//     return ret;
+// }
 
 void append_telemetry_data(cJSON *json)
 {
