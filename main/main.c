@@ -340,6 +340,10 @@ void init_pins()
     gpio_set_direction(PIN_DIR, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_DIR, 0);
 
+    gpio_reset_pin(PIN_LED);
+    gpio_set_direction(PIN_LED, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_LED, 0);
+
     // gpio_reset_pin(PIN_STOP);
     // gpio_set_direction(PIN_STOP, GPIO_MODE_INPUT);
     // gpio_set_pull_mode(PIN_STOP, GPIO_PULLUP_ONLY);
@@ -523,7 +527,7 @@ void app_main(void)
             ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
             ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
             pwm_flag_paused = true;
-            ESP_LOGI("AAAAA", "TIMEOUT");
+            // ESP_LOGI("AAAAA", "TIMEOUT");
         }
         ret = data(spi, spi_test_buf, sizeof(spi_test_buf), true);
 
@@ -531,10 +535,10 @@ void app_main(void)
         {   
             int32_t spi_enc_count = ((uint32_t)spi_test_buf[1] << 16) + ((uint32_t)spi_test_buf[2] << 8) + (uint32_t)spi_test_buf[3];
             // ESP_LOGI("buf", "%i %i %i %i", spi_test_buf[0], spi_test_buf[1], spi_test_buf[2], spi_test_buf[3]);
-            ESP_LOGI("MISO_pos", "%02X %02X %02X %02X", spi_test_buf[0],spi_test_buf[1],spi_test_buf[2],spi_test_buf[3]);
+            // ESP_LOGI("MISO_pos", "%02X %02X %02X %02X", spi_test_buf[0],spi_test_buf[1],spi_test_buf[2],spi_test_buf[3]);
             ret = data(spi, spi_test_buf1, sizeof(spi_test_buf1), false);
             uint32_t spi_time_count = ((uint32_t)spi_test_buf1[0] << 24) + ((uint32_t)spi_test_buf1[1] << 16) + ((uint32_t)spi_test_buf1[2] << 8) + (uint32_t)spi_test_buf1[3];
-            ESP_LOGI("MISO_time", "%02X %02X %02X %02X \n", spi_test_buf1[0],spi_test_buf1[1],spi_test_buf1[2],spi_test_buf1[3]);
+            // ESP_LOGI("MISO_time", "%02X %02X %02X %02X \n", spi_test_buf1[0],spi_test_buf1[1],spi_test_buf1[2],spi_test_buf1[3]);
             enc_pos_prev = enc_pos;
             enc_pos = (spi_enc_count - 1048576);
             time_count_prev = time_count;
@@ -576,7 +580,9 @@ void app_main(void)
         }
 
         pid_r = enc_goal - enc_pos;
-        ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, pid_r=%i", enc_pos, enc_goal, pid_r);
+        if (pid_r == 0) gpio_set_level(PIN_LED, 1);
+        else gpio_set_level(PIN_LED, 0);
+        // ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, pid_r=%i", enc_pos, enc_goal, pid_r);
         if (!flag_timeout)
         {
             if (abs(pid_r) > 0)
@@ -589,8 +595,9 @@ void app_main(void)
 
                 pid_u = pid_up + pid_ui + pid_ud;
                 pid_r_prev = pid_r;
+                // ESP_LOGI("PID:", "u = %.2f, up = %.2f, ui = %.2f, ud = %.2f", pid_u, pid_up, pid_ui, pid_ud);
 
-                pwm_dir = (pid_u >= 0) ? 1 : 0;
+                pwm_dir = (pid_u > 0) ? 1 : 0;
                 pwm_freq = abs((int)pid_u);
                 pwm_freq = (pwm_freq < pwm_freq_min) ? pwm_freq_min : pwm_freq;
                 pwm_freq = (pwm_freq > pwm_freq_max_static) ? pwm_freq_max_static : pwm_freq;
@@ -598,14 +605,14 @@ void app_main(void)
                 //enc_avg_pos += enc_pos;
                 //enc_avg_vel += enc_pos - enc_pos_prev;
                 // ESP_LOGI("ddd", "enc_avg_vel_th = %.4f, freq = %i", enc_avg_vel_th, pwm_freq);
-
+                // ESP_LOGI("PWM:", "dir = %i, freq = %.2f", pwm_dir, pwm_freq);
                 gpio_set_level(PIN_DIR, pwm_dir);
 
                 if (pwm_flag_paused)
                 {
                     ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, DEFAULT_DUTY_RESOLUTION_BIT - 1)));
                     pwm_flag_paused = false;
-                    ESP_LOGI(TAG, "Timer resumed");
+                    // ESP_LOGI(TAG, "Timer resumed");
                 }
 
                 ledc_set_freq(LEDC_HIGH_SPEED_MODE, LEDC_TIMER_0, pwm_freq);
@@ -618,7 +625,7 @@ void app_main(void)
                 ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
                 ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
                 pwm_flag_paused = true;
-                ESP_LOGI(TAG, "Timer paused (duty=0)");
+                // ESP_LOGI(TAG, "Timer paused (duty=0)");
                 pwm_freq = 0;
                 timeout_counter = 0;
                 avg_counter = 0;
@@ -627,7 +634,7 @@ void app_main(void)
 
         if (log_counter++ >= log_counter_max)
         {
-            ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, err=%d\n", enc_pos, enc_goal, pid_r);
+            // ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, err=%d\n", enc_pos, enc_goal, pid_r);
             log_counter = 0;
         }
 
@@ -646,11 +653,11 @@ void app_main(void)
                                          (struct sockaddr *)&g_last_cmd_source_addr, sizeof(struct sockaddr));
                         if (err < 0)
                         {
-                            ESP_LOGW(TAG, "Failed to send telemetry: errno %d", errno);
+                            // ESP_LOGW(TAG, "Failed to send telemetry: errno %d", errno);
                         }
                         else
                         {
-                            ESP_LOGI(TAG, "Telemetry sent: enc_pos=%d", enc_pos);
+                            // ESP_LOGI(TAG, "Telemetry sent: enc_pos=%d", enc_pos);
                         }
                         close(sock);
                     }

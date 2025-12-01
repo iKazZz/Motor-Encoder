@@ -46,7 +46,7 @@
 #define PIN_PUL                 (5)
 #define PIN_DIR                 (4)
 //#define PIN_STOP                (15)
-//#define PIN_LED                 (2)
+#define PIN_LED                 (2)
 
 #define HOST                    SPI2_HOST
 #define PIN_NUM_MISO            (12)
