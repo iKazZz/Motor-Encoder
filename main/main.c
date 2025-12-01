@@ -148,6 +148,7 @@ void encoder_reading_task(void *pvParameters)
                 enc_pos = (spi_enc_count - 1048576);
                 time_count_prev = time_count;
                 time_count = (double)spi_time_count * 20 / 1000000000;
+                ESP_LOGI("Encoder:", "pos = %i, time = %.2f", enc_pos, time_count);
                 enc_angle_prev = enc_angle;
                 enc_angle = (((double)spi_enc_count - 1048576) / 4) * 360 / 2048;
                 
