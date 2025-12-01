@@ -146,9 +146,14 @@ void encoder_reading_task(void *pvParameters)
             if (xSemaphoreTake(g_encoder_mutex, portMAX_DELAY)) {
                 enc_pos_prev = enc_pos;
                 enc_pos = (spi_enc_count - 1048576);
+                if (enc_pos == 0)
+                {
+                    gpio_set_level(PIN_LED, 1);
+                }
+                else gpio_set_level(PIN_LED, 0);
                 time_count_prev = time_count;
                 time_count = (double)spi_time_count * 20 / 1000000000;
-                ESP_LOGI("Encoder:", "pos = %i, time = %.2f", enc_pos, time_count);
+                ESP_LOGI("Encoder:", "pos = %i, goal = %i, u = %i, time = %.2f, dir = %i", enc_pos, enc_goal, pid_u, time_count, pwm_dir);
                 enc_angle_prev = enc_angle;
                 enc_angle = (((double)spi_enc_count - 1048576) / 4) * 360 / 2048;
                 
@@ -180,12 +185,12 @@ void pid_control_task(void *pvParameters)
         if (xQueueReceive(g_spi_data_queue, &spi_data, pdMS_TO_TICKS(2))) {
             if (timeout_counter > timeout_counter_max) {
                 flag_timeout = true;
-                if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
+                // if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
                     ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
                     ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
                     pwm_flag_paused = true;
                     xSemaphoreGive(g_pwm_mutex);
-                }
+                // }
                 continue;
             }
             
@@ -195,14 +200,14 @@ void pid_control_task(void *pvParameters)
                 pid_r = enc_goal - enc_pos;
                 
                 if (!flag_timeout && abs(pid_r) > 0) {
-                    if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
+                    // if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
                         if (pwm_flag_paused) {
                             ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, DEFAULT_DUTY_RESOLUTION_BIT - 1)));
                             ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
                             pwm_flag_paused = false;
                         }
                         xSemaphoreGive(g_pwm_mutex);
-                    }
+                    // }
                     
                     
                     pid_up = pid_kp * pid_r;
@@ -213,7 +218,7 @@ void pid_control_task(void *pvParameters)
                     pid_r_prev = pid_r;
                     
                     
-                    if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
+                    // if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
                         pwm_dir = (pid_u >= 0) ? 1 : 0;
                         pwm_freq = abs((int)pid_u);
                         pwm_freq = (pwm_freq < pwm_freq_min) ? pwm_freq_min : pwm_freq;
@@ -224,12 +229,12 @@ void pid_control_task(void *pvParameters)
                         ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
                         
                         xSemaphoreGive(g_pwm_mutex);
-                    }
+                    // }
                     
                     timeout_counter++;
                 } else if (!flag_timeout) {
                     // Остановка при достижении цели
-                    if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
+                    // if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
                         if (!pwm_flag_paused) {
                             ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
                             ledc_update_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0);
@@ -237,7 +242,7 @@ void pid_control_task(void *pvParameters)
                             pwm_freq = 0;
                         }
                         xSemaphoreGive(g_pwm_mutex);
-                    }
+                    // }
                     timeout_counter = 0;
                     avg_counter = 0;
                 }
@@ -587,6 +592,10 @@ void init_pins()
     gpio_reset_pin(PIN_DIR);
     gpio_set_direction(PIN_DIR, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_DIR, 0);
+
+    gpio_reset_pin(PIN_LED);
+    gpio_set_direction(PIN_LED, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_LED, 0);
 
     // install gpio isr service
     gpio_install_isr_service(0);
