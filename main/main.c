@@ -146,14 +146,10 @@ void encoder_reading_task(void *pvParameters)
             if (xSemaphoreTake(g_encoder_mutex, portMAX_DELAY)) {
                 enc_pos_prev = enc_pos;
                 enc_pos = (spi_enc_count - 1048576);
-                if (enc_pos == 0)
-                {
-                    gpio_set_level(PIN_LED, 1);
-                }
-                else gpio_set_level(PIN_LED, 0);
+
                 time_count_prev = time_count;
                 time_count = (double)spi_time_count * 20 / 1000000000;
-                ESP_LOGI("Encoder:", "pos = %i, goal = %i, u = %i, time = %.2f, dir = %i", enc_pos, enc_goal, pid_u, time_count, pwm_dir);
+                // ESP_LOGI("Encoder:", "pos = %i, goal = %i, u = %i, time = %.2f, dir = %i", enc_pos, enc_goal, pid_u, time_count, pwm_dir);
                 enc_angle_prev = enc_angle;
                 enc_angle = (((double)spi_enc_count - 1048576) / 4) * 360 / 2048;
                 
@@ -172,7 +168,8 @@ void encoder_reading_task(void *pvParameters)
             xQueueSend(g_spi_data_queue, &spi_data, 0);
         }
         
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
+        // vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -252,7 +249,8 @@ void pid_control_task(void *pvParameters)
             }
         }
         
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
+        // vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -292,22 +290,22 @@ void averaging_task(void *pvParameters)
     }
 }
 
-void logging_task(void *pvParameters)
-{
-    TickType_t xLastWakeTime = xTaskGetTickCount();
+// void logging_task(void *pvParameters)
+// {
+//     TickType_t xLastWakeTime = xTaskGetTickCount();
     
-    while (1) {
-        if (log_counter++ >= log_counter_max) {
-            // ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", 
-            //         spi_test_buf[0], spi_test_buf[1], spi_test_buf[2], spi_test_buf[3], 
-            //         spi_test_buf[4], spi_test_buf[5], spi_test_buf[6], spi_test_buf[7]);
-            ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, err=%d", enc_pos, enc_goal, pid_r);
-            log_counter = 0;
-        }
+//     while (1) {
+//         if (log_counter++ >= log_counter_max) {
+//             // ESP_LOGI("MISO", "%02X %02X %02X %02X %02X %02X %02X %02X", 
+//             //         spi_test_buf[0], spi_test_buf[1], spi_test_buf[2], spi_test_buf[3], 
+//             //         spi_test_buf[4], spi_test_buf[5], spi_test_buf[6], spi_test_buf[7]);
+//             ESP_LOGI(TAG, "enc_pos=%i, enc_goal=%i, err=%d", enc_pos, enc_goal, pid_r);
+//             log_counter = 0;
+//         }
         
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
-    }
-}
+//         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
+//     }
+// }
 
 void telemetry_task(void *pvParameters)
 {
@@ -769,7 +767,7 @@ void app_main(void)
     xTaskCreate(encoder_reading_task, "encoder_reader", 4096, NULL, 2, NULL);
     xTaskCreate(pid_control_task, "pid_controller", 4096, NULL, 2, NULL);
     xTaskCreate(averaging_task, "averaging", 2048, NULL, 1, NULL);
-    xTaskCreate(logging_task, "logging", 2048, NULL, 1, NULL);
+    // xTaskCreate(logging_task, "logging", 2048, NULL, 1, NULL);
     xTaskCreate(telemetry_task, "telemetry", 2048, NULL, 1, NULL);
 
     // Сетевые задачи
