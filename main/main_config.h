@@ -44,7 +44,7 @@
 #define STR_CMD_WRITE_FLASH     "save_to_flash"
 
 #define PIN_PUL                 (5)
-#define PIN_DIR                 (2)
+#define PIN_DIR                 (4)
 //#define PIN_STOP                (15)
 //#define PIN_LED                 (2)
 
