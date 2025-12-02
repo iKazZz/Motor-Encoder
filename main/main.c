@@ -113,7 +113,7 @@ QueueHandle_t g_spi_data_queue;
 SemaphoreHandle_t g_encoder_mutex;
 SemaphoreHandle_t g_pid_mutex;
 SemaphoreHandle_t g_pwm_mutex;
-SemaphoreHandle_t g_avg_mutex;
+SemaphoreHandle_t g_avg_mutex;  
 
 bool g_flag_send_telemetry = true;
 struct sockaddr_storage g_last_cmd_source_addr;
@@ -130,42 +130,73 @@ void command_processing_task(void *pvParameters);
 void init_pins();
 esp_err_t spi_data_transfer(uint8_t *data, int len, bool flag_pos);
 
+TaskHandle_t pid_task_handle = NULL;
 
-void encoder_reading_task(void *pvParameters)
+void encoder_processing_task(void *pvParameters)
 {
     TickType_t xLastWakeTime = xTaskGetTickCount();
+    t_spi_data spi_data;
     
     while (1) {
         esp_err_t ret = spi_data_transfer(spi_test_buf, sizeof(spi_test_buf), true);
         
         if (ret == ESP_OK) {
-            int32_t spi_enc_count = ((uint32_t)spi_test_buf[1] << 16) + ((uint32_t)spi_test_buf[2] << 8) + (uint32_t)spi_test_buf[3];
-            ret = spi_data_transfer(spi_test_buf, sizeof(spi_test_buf), false);
-            uint32_t spi_time_count = ((uint32_t)spi_test_buf[0] << 24) + ((uint32_t)spi_test_buf[1] << 16) + ((uint32_t)spi_test_buf[2] << 8) + (uint32_t)spi_test_buf[3];
+            int32_t spi_enc_count = ((uint32_t)spi_test_buf[1] << 16) + 
+                                    ((uint32_t)spi_test_buf[2] << 8) + 
+                                    (uint32_t)spi_test_buf[3];
             
-            if (xSemaphoreTake(g_encoder_mutex, portMAX_DELAY)) {
+            ret = spi_data_transfer(spi_test_buf, sizeof(spi_test_buf), false);
+            uint32_t spi_time_count = ((uint32_t)spi_test_buf[0] << 24) + 
+                                      ((uint32_t)spi_test_buf[1] << 16) + 
+                                      ((uint32_t)spi_test_buf[2] << 8) + 
+                                      (uint32_t)spi_test_buf[3];
+
+            if (xSemaphoreTake(g_encoder_mutex, portMAX_DELAY) &&
+                xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
+                
                 enc_pos_prev = enc_pos;
-                enc_pos = (spi_enc_count - 1048576);
                 time_count_prev = time_count;
-                time_count = (double)spi_time_count * 20 / 1000000000;
                 enc_angle_prev = enc_angle;
-                enc_angle = (((double)spi_enc_count - 1048576) / 4) * 360 / 2048;
+            
+                enc_pos = (spi_enc_count - 1048576); 
+                time_count = (double)spi_time_count * 20 / 1000000000;  
+                enc_angle = (((double)spi_enc_count - 1048576) / 4) * 360 / 2048;  
                 
                 if (time_count - time_count_prev != 0) 
                     enc_vel = (enc_pos - enc_pos_prev) / (time_count - time_count_prev);
                 else 
                     enc_vel = 0;
                 
+                if (avg_counter++ >= avg_counter_max) {
+                    
+                    if (time_count - avg_time_count_start != 0) {
+                        enc_avg_vel = (enc_pos - enc_avg_pos_start) / 
+                                      (time_count - avg_time_count_start);
+                        enc_avg_freq = enc_avg_vel_th;
+                    } else {
+                        enc_avg_vel = 0;
+                        enc_avg_freq = 0;
+                    }
+
+                    enc_avg_vel_th = ((double)8192 / 25000 * pwm_freq);
+
+                    enc_avg_vel_th = (pwm_dir == 1) ? enc_avg_vel_th : -enc_avg_vel_th;
+                    
+                    avg_time_count_start = time_count;
+                    enc_avg_pos_start = enc_pos;
+                    avg_counter = 0;
+                }
+                xSemaphoreGive(g_pwm_mutex);
                 xSemaphoreGive(g_encoder_mutex);
             }
+            spi_data.enc_pos = enc_pos;
+            spi_data.time_count = time_count;
             
-            t_spi_data spi_data = {
-                .enc_pos = enc_pos,
-                .time_count = time_count
-            };
-            xQueueSend(g_spi_data_queue, &spi_data, 0);
+            if (pid_task_handle != NULL) {
+                xTaskNotify(pid_task_handle, 1, eSetBits);
+            }
+
         }
-        
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
     }
 }
@@ -176,7 +207,9 @@ void pid_control_task(void *pvParameters)
     TickType_t xLastWakeTime = xTaskGetTickCount();
     
     while (1) {
-        if (xQueueReceive(g_spi_data_queue, &spi_data, pdMS_TO_TICKS(2))) {
+
+    if (xTaskNotifyWait(1, 1, NULL, portMAX_DELAY) == pdTRUE) {
+
             if (timeout_counter > timeout_counter_max) {
                 flag_timeout = true;
                 if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
@@ -187,7 +220,7 @@ void pid_control_task(void *pvParameters)
                 }
                 continue;
             }
-            
+
             if (xSemaphoreTake(g_encoder_mutex, portMAX_DELAY) && 
                 xSemaphoreTake(g_pid_mutex, portMAX_DELAY)) {
                 
@@ -227,7 +260,6 @@ void pid_control_task(void *pvParameters)
                     
                     timeout_counter++;
                 } else if (!flag_timeout) {
-                    // Остановка при достижении цели
                     if (xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
                         if (!pwm_flag_paused) {
                             ledc_set_duty(LEDC_HIGH_SPEED_MODE, LEDC_CHANNEL_0, 0);
@@ -248,42 +280,7 @@ void pid_control_task(void *pvParameters)
         
         vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
     }
-}
-
-
-void averaging_task(void *pvParameters)
-{
-    TickType_t xLastWakeTime = xTaskGetTickCount();
     
-    while (1) {
-        if (xSemaphoreTake(g_avg_mutex, portMAX_DELAY) &&
-            xSemaphoreTake(g_encoder_mutex, portMAX_DELAY) &&
-            xSemaphoreTake(g_pwm_mutex, portMAX_DELAY)) {
-            
-            if (avg_counter++ >= avg_counter_max) {
-                if (time_count - avg_time_count_start != 0) {
-                    enc_avg_vel = (enc_pos - enc_avg_pos_start) / (time_count - avg_time_count_start);
-                    enc_avg_freq = enc_avg_vel_th;
-                } else {
-                    enc_avg_vel = 0;
-                    enc_avg_freq = 0;
-                }
-                
-                enc_avg_vel_th = ((double)8192 / 25000 * pwm_freq);
-                enc_avg_vel_th = (pwm_dir == 1) ? enc_avg_vel_th : -enc_avg_vel_th;
-                
-                avg_time_count_start = time_count;
-                enc_avg_pos_start = enc_pos;
-                avg_counter = 0;
-            }
-            
-            xSemaphoreGive(g_pwm_mutex);
-            xSemaphoreGive(g_encoder_mutex);
-            xSemaphoreGive(g_avg_mutex);
-        }
-        
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
-    }
 }
 
 void logging_task(void *pvParameters)
@@ -677,7 +674,6 @@ void app_main(void)
     init_pins();
     init_mutexes();
 
-    // Инициализация SPI
     esp_err_t ret;
     spi_bus_config_t buscfg = {
         .miso_io_num = PIN_NUM_MISO,
@@ -717,7 +713,6 @@ void app_main(void)
 
     nvs_read_config();
     
-    // Инициализация сети
     t_eth_config config = {
         .ip = g_ip_addr, 
         .pass = g_pass, 
@@ -728,13 +723,6 @@ void app_main(void)
     };
     eth_start(config);
 
-    // Создание очередей
-    g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
-    g_spi_data_queue = xQueueCreate(10, sizeof(t_spi_data));
-    assert(g_command_queue != NULL);
-    assert(g_spi_data_queue != NULL);
-
-    // Инициализация ШИМ
     ledc_timer_config_t ledc_timer = {
         .speed_mode = LEDC_HIGH_SPEED_MODE,
         .duty_resolution = DEFAULT_DUTY_RESOLUTION,
@@ -755,24 +743,16 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
 
-    // Создание задач
-    xTaskCreate(encoder_reading_task, "encoder_reader", 4096, NULL, 2, NULL);
-    xTaskCreate(pid_control_task, "pid_controller", 4096, NULL, 2, NULL);
-    xTaskCreate(averaging_task, "averaging", 2048, NULL, 1, NULL);
+    g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
+
+    xTaskCreate(pid_control_task, "pid_controller", 4096, NULL, 3, &pid_task_handle);
+    xTaskCreate(encoder_processing_task, "encoder_processing", 2048, NULL, 2, NULL);
     xTaskCreate(logging_task, "logging", 2048, NULL, 1, NULL);
     xTaskCreate(telemetry_task, "telemetry", 2048, NULL, 1, NULL);
 
-    // Сетевые задачи
     if (USE_COMMM_ETHERNET || USE_COMMM_WIFI_AP || USE_COMMM_WIFI_STA)
     {
-        xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 2, NULL);
-        xTaskCreate(udp_server_task, "udp_server", 4096, (void *)AF_INET, 2, NULL);
-    }
-
-    ESP_LOGI(TAG, "111");
-
-    while (1)
-    {
-      vTaskDelay(pdMS_TO_TICKS(10));
+        xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 1, NULL);
+        xTaskCreate(udp_server_task, "udp_server", 4096, (void *)AF_INET, 1, NULL);
     }
 }
