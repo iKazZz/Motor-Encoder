@@ -197,7 +197,7 @@ void encoder_processing_task(void *pvParameters)
             }
 
         }
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
+        //vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(2));
     }
 }
 
@@ -278,7 +278,7 @@ void pid_control_task(void *pvParameters)
             }
         }
         
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
+        //vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(2));
     }
     
 }
@@ -296,7 +296,7 @@ void logging_task(void *pvParameters)
             log_counter = 0;
         }
         
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(5));
     }
 }
 
@@ -324,7 +324,7 @@ void telemetry_task(void *pvParameters)
             telemetry_counter = 0;
         }
         
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(10));
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(5));
     }
 }
 
@@ -711,7 +711,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
-    nvs_read_config();
+    nvs_read_config(); 
     
     t_eth_config config = {
         .ip = g_ip_addr, 
@@ -746,9 +746,9 @@ void app_main(void)
     g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
 
     xTaskCreate(pid_control_task, "pid_controller", 4096, NULL, 3, &pid_task_handle);
-    xTaskCreate(encoder_processing_task, "encoder_processing", 2048, NULL, 2, NULL);
-    xTaskCreate(logging_task, "logging", 2048, NULL, 1, NULL);
-    xTaskCreate(telemetry_task, "telemetry", 2048, NULL, 1, NULL);
+    xTaskCreate(encoder_processing_task, "encoder_processing", 4096, NULL, 2, NULL);
+    xTaskCreate(logging_task, "logging", 4096, NULL, 1, NULL);
+    xTaskCreate(telemetry_task, "telemetry", 4096, NULL, 1, NULL);
 
     if (USE_COMMM_ETHERNET || USE_COMMM_WIFI_AP || USE_COMMM_WIFI_STA)
     {
