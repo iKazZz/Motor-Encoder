@@ -556,7 +556,7 @@ void app_main(void)
                 ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, DUTY_RESOLUTION_BIT - 1)));  
                 ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
                 timer_paused = false;
-                ESP_LOGI(TAG, "Timer resumed");
+                // ESP_LOGI(TAG, "Timer resumed");
             }
 
             float p_term = kp * r;
@@ -613,12 +613,12 @@ void app_main(void)
             ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
 
             timer_paused = true;
-            ESP_LOGI(TAG, "Timer paused (duty=0)");
+            // ESP_LOGI(TAG, "Timer paused (duty=0)");
         }
 
         if (log_count++ == 50) 
         {
-            ESP_LOGI(TAG, "s=%i, goal=%i, duty_ratio=%.2f\n", encoder_pos, goal_pos, duty_ratio);
+            // ESP_LOGI(TAG, "s=%i, goal=%i, duty_ratio=%.2f\n", encoder_pos, goal_pos, duty_ratio);
             log_count = 0;
         }
 
