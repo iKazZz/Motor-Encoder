@@ -14,21 +14,20 @@
 #define WIFI_AP_PASS            ""
 #define WIFI_AP_CHANNEL         (0)
 
-// #define DEFAULT_WIFI_STA_SSID   "Aud112"
-#define DEFAULT_WIFI_STA_SSID   "RT-GPON-F6ED"
+#define DEFAULT_WIFI_STA_SSID   "Aud112"
+// #define DEFAULT_WIFI_STA_SSID   "RT-GPON-F6ED"
 // #define DEFAULT_WIFI_STA_SSID   "Nadya 5 g"
 
-// #define DEFAULT_WIFI_STA_PASS   "justapassword"
-#define DEFAULT_WIFI_STA_PASS   "yPYAEyYsUE"
+#define DEFAULT_WIFI_STA_PASS   "justapassword"
+// #define DEFAULT_WIFI_STA_PASS   "yPYAEyYsUE"
 // #define DEFAULT_WIFI_STA_PASS   "25049025"
 
-// #define DEFAULT_STATIC_IP_ADDR  "192.168.1.10"
-#define DEFAULT_STATIC_IP_ADDR  "192.168.0.10"
+#define DEFAULT_STATIC_IP_ADDR  "192.168.1.10"
+// #define DEFAULT_STATIC_IP_ADDR  "192.168.0.10"
 // #define DEFAULT_STATIC_IP_ADDR  "192.168.0.50"
 
 #define STATIC_NETMASK_ADDR     "255.255.255.0"
 #define STATIC_GW_ADDR          "192.168.1.1"
-// #define STATIC_GW_ADDR          "192.168.0.10"
 #define PORT                    (4242)
 
 #define NVS_STORAGE             "stepper"
@@ -50,8 +49,8 @@
 #define STR_CMD_READ_FLASH      "restore_from_flash"
 #define STR_CMD_WRITE_FLASH     "save_to_flash"
 
-#define PIN_STEP                (32)
-#define PIN_DIR                 (33)
+#define PIN_ONE                 (19)
+#define PIN_TWO                 (18)
 #define PIN_STOP                (15)
 #define PIN_LED                 (2)
 #define PIN_A                   (25)
