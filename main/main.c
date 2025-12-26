@@ -91,6 +91,7 @@ float kp = 2;
 float ki = 0.5;
 float kd = 0.5;
 float min_freq = 200;
+static float u_integral_max = 100; 
 signed int goal_pos = 0;
 int graph_count = 0;
 signed int time_arr[GRAPH_ARRAY_SIZE]; // Массив значений времени
@@ -109,22 +110,9 @@ gptimer_handle_t g_gptimer;
 
 void append_telemetry_data(cJSON *json)
 {
-    cJSON_AddStringToObject(json, STR_TELEMETRY, "false");
+    cJSON_AddStringToObject(json, STR_TELEMETRY, "true");
     //cJSON_AddNumberToObject(json, "graph_count", graph_count);
-    if (graph_count == GRAPH_ARRAY_SIZE)
-    {
-        int i = 0;
-        while (i < GRAPH_ARRAY_SIZE)
-        {
-            char str[10];
-            itoa(time_arr[i], str, 10);
-            cJSON_AddNumberToObject(json, str, encoder_pos_arr[i]);
-            time_arr[i] = 0;
-            encoder_pos_arr[i] = 0;
-            i++;
-        }
-        graph_count = 0;
-    }
+    cJSON_AddNumberToObject(json, "encoder_pos", encoder_pos);
 }
 
 char* build_telemetry_string()
@@ -152,6 +140,7 @@ char* build_config_string(bool for_nvs)
     cJSON_AddNumberToObject(json, "kp", kp);
     cJSON_AddNumberToObject(json, "ki", ki);
     cJSON_AddNumberToObject(json, "kd", kd);
+    cJSON_AddNumberToObject(json, "u_integral_max", u_integral_max);
     cJSON_AddNumberToObject(json, "min_freq", min_freq);
 
     if (!for_nvs)
@@ -219,6 +208,7 @@ void parse_config_string(const char *str)
             if (!strcmp(param_name, "kp")) kp = subitem->valuedouble;
             if (!strcmp(param_name, "ki")) ki = subitem->valuedouble;
             if (!strcmp(param_name, "kd")) kd = subitem->valuedouble;
+            if (!strcmp(param_name, "u_integral_max")) u_integral_max = subitem->valuedouble;
             if (!strcmp(param_name, "goal_pos")) goal_pos = subitem->valueint;
 
             if (!strcmp(param_name, STR_CMD_READ_FLASH) && subitem->valueint) nvs_read_config();
@@ -457,7 +447,8 @@ int step_max = 100;
 long step_acc = 0;
 int step;
 static int log_count = 0;
-static float u_integral = 0;     
+static int telemetry_counter = 0;
+static float u_integral = 0;
 static float u_prev_error = 0;     
 static bool timer_paused = false; 
 
@@ -549,7 +540,7 @@ void app_main(void)
         signed int r = goal_pos - encoder_pos; 
         //ESP_LOGI(TAG, "s=%i, goal=%i, r=%f", s, goal, r);
 
-        if (abs(r) > 0) 
+        if (abs(r) > 1) 
         {      
             if (timer_paused) 
             {
@@ -564,7 +555,7 @@ void app_main(void)
             u_integral += r;
             //if (u_integral > 1000) u_integral = 1000;
             //if (u_integral < -1000) u_integral = -1000;
-            u_integral = (u_integral > 1000) ? 1000 : (u_integral < -1000) ? -1000 : u_integral;
+            u_integral = (u_integral > u_integral_max) ? u_integral_max : (u_integral < -u_integral_max) ? -u_integral_max : u_integral;
             float i_term = ki * u_integral;
             
            
@@ -620,6 +611,37 @@ void app_main(void)
         {
             // ESP_LOGI(TAG, "s=%i, goal=%i, duty_ratio=%.2f\n", encoder_pos, goal_pos, duty_ratio);
             log_count = 0;
+        }
+        if (telemetry_counter++ >= 25)
+        {
+            if (g_flag_send_telemetry)
+            {
+                char *telemetry_to_send = build_telemetry_string();
+                if (telemetry_to_send)
+                {
+                    // Отправка телеметрии на последний известный адрес
+                    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+                    if (sock >= 0)
+                    {
+                        int err = sendto(sock, telemetry_to_send, strlen(telemetry_to_send), 0,
+                                         (struct sockaddr *)&g_last_cmd_source_addr, sizeof(struct sockaddr));
+                        if (err < 0)
+                        {
+                            // ESP_LOGW(TAG, "Failed to send telemetry: errno %d", errno);
+                        }
+                        else
+                        {
+                            // ESP_LOGI(TAG, "Telemetry sent: enc_pos=%d", enc_pos);
+                        }
+                        close(sock);
+                    }
+                    free(telemetry_to_send);
+
+                }
+                            // ESP_LOGI("111", "4");
+
+            }
+            telemetry_counter = 0;
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
