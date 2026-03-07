@@ -3,6 +3,9 @@
 #define SC25_COB_ESC_HZ                                     (0x200)
 #define SC25_CMD_ESC_HZ                                     (0x20)
 
+#define SC25_COB_SERVO                                      (0x300)
+#define SC25_CMD_SERVO                                      (0x31)
+
 #define SC25_COB_MODULO_COUNT                               (0x300)
 #define SC25_CMD_MODULO_COUNT                               (0x32)
 
@@ -38,6 +41,10 @@
 
 #define SC25_TELEMETRY_INDEX_MODULO_COUNT                   (0x4000)
 #define SC25_TELEMETRY_SUB_INDEX_MODULO_COUNT               (0x1A)
+
+#define SC25_TELEMETRY_INDEX_LIMIT_SWITCH                   (0x5009)
+#define SC25_TELEMETRY_SUB_INDEX_LIMIT_SWITCH_NEG           (0x05)
+#define SC25_TELEMETRY_SUB_INDEX_LIMIT_SWITCH_POS           (0x06)
 
 #define SC25_CONFIG_INDEX_ENCODER_BIAS                      (0x3011)
 #define SC25_CONFIG_SUB_INDEX_ENCODER_BIAS                  (0x03)

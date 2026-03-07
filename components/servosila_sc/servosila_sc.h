@@ -19,10 +19,13 @@ typedef enum
     MOTION_SHORTEST = 3
 } tMotionType;
 
+int16_t SC25_encode_float16 (float f32);
+float SC25_decode_float16 (int16_t bits);
 esp_err_t sc_cmd_RESET(const uint32_t id, TickType_t timeout);
 esp_err_t sc_cmd_RESET_WORKZONE(const uint32_t id, TickType_t timeout);
 esp_err_t sc_cmd_STOP(const uint32_t id, TickType_t timeout);
 esp_err_t sc_cmd_ESC_HZ(uint32_t id, const float freq, TickType_t timeout);
+esp_err_t sc_cmd_SERVO(const uint32_t id, const uint32_t count, TickType_t timeout);
 esp_err_t sc_cmd_DFCPOS(const uint32_t id, float voltage, float pos, TickType_t timeout);
 esp_err_t sc_cmd_read_QUADRATURE(const uint32_t id, TickType_t timeout);
 bool sc_decode_QUADRATURE(uint32_t id, const twai_message_t msg, uint32_t *pCount);
@@ -31,6 +34,12 @@ esp_err_t sc_init_encoder_bias(const uint32_t id, float voltage, TickType_t sett
 esp_err_t sc_cmd_read_MODULOCOUNT(const uint32_t id, TickType_t timeout);
 bool sc_decode_MODULO_COUNT(uint32_t id, const twai_message_t msg, uint32_t *pCount);
 esp_err_t sc_cmd_MODULO_COUNT(const uint32_t id, const uint32_t count, tMotionType motion_type, TickType_t timeout);
+esp_err_t sc_cmd_read_LIMIT_SWITCH_NEG(const uint32_t id, TickType_t timeout);
+bool sc_decode_LIMIT_SWITCH_NEG(uint32_t id, const twai_message_t msg, uint32_t *pCount);
+esp_err_t sc_cmd_read_LIMIT_SWITCH_POS(const uint32_t id, TickType_t timeout);
+bool sc_decode_LIMIT_SWITCH_POS(uint32_t id, const twai_message_t msg, uint32_t *pCount);
+
+
 
 #ifdef __cplusplus
 }

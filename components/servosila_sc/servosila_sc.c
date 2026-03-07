@@ -12,6 +12,7 @@ static const char *TAG = "servo";
 
 #define MAX_FLOAT16 ( 128.0f)
 #define MIN_FLOAT16 (-MAX_FLOAT16)
+
 float SC25_decode_float16 (int16_t bits)
 {
   //de-scaling
@@ -108,6 +109,26 @@ esp_err_t sc_cmd_ESC_HZ(const uint32_t id, const float freq, TickType_t timeout)
 
     return twai_transmit(&message, timeout);
 };
+
+esp_err_t sc_cmd_SERVO(const uint32_t id, const uint32_t count, TickType_t timeout)
+{
+    const twai_message_t message = {
+    // Message type and format settings
+    .extd = 0,              // Standard Format message (11-bit ID)
+    .rtr = 0,               // Send a data frame
+    .ss = 1,                // Is single shot (won't retry on error or NACK)
+    .self = 0,              // Not a self reception request
+    .dlc_non_comp = 0,      // DLC is less than 8
+
+    // Message ID and payload
+    .identifier = id + SC25_COB_SERVO,
+    .data_length_code = 8,
+    .data = {SC25_CMD_SERVO, 0, 0, 0, 
+             *((uint8_t*)&count), *((uint8_t*)&count + 1), *((uint8_t*)&count + 2), *((uint8_t*)&count + 3)}
+    };
+
+    return twai_transmit(&message, timeout);
+}
 
 esp_err_t sc_cmd_MODULO_COUNT(const uint32_t id, const uint32_t count, tMotionType motion_type, TickType_t timeout)
 {
@@ -281,6 +302,80 @@ bool sc_decode_MODULO_COUNT(uint32_t id, const twai_message_t msg, uint32_t *pCo
   if ((msg.data[1] != (SC25_TELEMETRY_INDEX_MODULO_COUNT & 0xFF)) ||
       (msg.data[2] != ((SC25_TELEMETRY_INDEX_MODULO_COUNT >> 8) & 0xFF)) || 
       (msg.data[3] != SC25_TELEMETRY_SUB_INDEX_MODULO_COUNT)) return false;
+
+  *((uint8_t*)pCount) = msg.data[4];
+  *((uint8_t*)pCount + 1) = msg.data[5];
+  *((uint8_t*)pCount + 2) = msg.data[6];
+  *((uint8_t*)pCount + 3) = msg.data[7];
+
+  return true;
+}
+
+esp_err_t sc_cmd_read_LIMIT_SWITCH_NEG(const uint32_t id, TickType_t timeout)
+{
+    const twai_message_t message = {
+    // Message type and format settings
+    .extd = 0,              // Standard Format message (11-bit ID)
+    .rtr = 0,               // Send a data frame
+    .ss = 1,                // Is single shot (won't retry on error or NACK)
+    .self = 0,              // Not a self reception request
+    .dlc_non_comp = 0,      // DLC is less than 8
+
+    // Message ID and payload
+    .identifier = id + SC25_COB_READ,
+    .data_length_code = 8,
+    .data = {SC25_CMD_READ, SC25_TELEMETRY_INDEX_LIMIT_SWITCH & 0xFF, (SC25_TELEMETRY_INDEX_LIMIT_SWITCH >> 8) & 0xFF, SC25_TELEMETRY_SUB_INDEX_LIMIT_SWITCH_NEG, 
+             0, 0, 0, 0}
+    };
+
+    return twai_transmit(&message, timeout);
+}
+
+bool sc_decode_LIMIT_SWITCH_NEG(uint32_t id, const twai_message_t msg, uint32_t *pCount)
+{
+  if (msg.identifier != (id + SC25_COB_READ_RESPONSE)) return false;
+  if (msg.data[0] != (SC25_CMD_RESPONSE_4B)) return false;
+
+  if ((msg.data[1] != (SC25_TELEMETRY_INDEX_LIMIT_SWITCH & 0xFF)) ||
+      (msg.data[2] != ((SC25_TELEMETRY_INDEX_LIMIT_SWITCH >> 8) & 0xFF)) || 
+      (msg.data[3] != SC25_TELEMETRY_SUB_INDEX_LIMIT_SWITCH_NEG)) return false;
+
+  *((uint8_t*)pCount) = msg.data[4];
+  *((uint8_t*)pCount + 1) = msg.data[5];
+  *((uint8_t*)pCount + 2) = msg.data[6];
+  *((uint8_t*)pCount + 3) = msg.data[7];
+
+  return true;
+}
+
+esp_err_t sc_cmd_read_LIMIT_SWITCH_POS(const uint32_t id, TickType_t timeout)
+{
+    const twai_message_t message = {
+    // Message type and format settings
+    .extd = 0,              // Standard Format message (11-bit ID)
+    .rtr = 0,               // Send a data frame
+    .ss = 1,                // Is single shot (won't retry on error or NACK)
+    .self = 0,              // Not a self reception request
+    .dlc_non_comp = 0,      // DLC is less than 8
+
+    // Message ID and payload
+    .identifier = id + SC25_COB_READ,
+    .data_length_code = 8,
+    .data = {SC25_CMD_READ, SC25_TELEMETRY_INDEX_LIMIT_SWITCH & 0xFF, (SC25_TELEMETRY_INDEX_LIMIT_SWITCH >> 8) & 0xFF, SC25_TELEMETRY_SUB_INDEX_LIMIT_SWITCH_POS, 
+             0, 0, 0, 0}
+    };
+
+    return twai_transmit(&message, timeout);
+}
+
+bool sc_decode_LIMIT_SWITCH_POS(uint32_t id, const twai_message_t msg, uint32_t *pCount)
+{
+  if (msg.identifier != (id + SC25_COB_READ_RESPONSE)) return false;
+  if (msg.data[0] != (SC25_CMD_RESPONSE_4B)) return false;
+
+  if ((msg.data[1] != (SC25_TELEMETRY_INDEX_LIMIT_SWITCH & 0xFF)) ||
+      (msg.data[2] != ((SC25_TELEMETRY_INDEX_LIMIT_SWITCH >> 8) & 0xFF)) || 
+      (msg.data[3] != SC25_TELEMETRY_SUB_INDEX_LIMIT_SWITCH_POS)) return false;
 
   *((uint8_t*)pCount) = msg.data[4];
   *((uint8_t*)pCount + 1) = msg.data[5];
