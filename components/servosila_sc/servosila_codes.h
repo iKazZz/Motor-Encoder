@@ -58,3 +58,6 @@
 
 #define SC25_TELEMETRY_INDEX_WORKZONE_COUNT                 (0x4000)
 #define SC25_TELEMETRY_SUB_INDEX_WORKZONE_COUNT             (0x19)
+
+#define SC25_TELEMETRY_INDEX_SAMPLE_NUM                     (0x4000)
+#define SC25_TELEMETRY_SUB_INDEX_SAMPLE_NUM                 (0x04)

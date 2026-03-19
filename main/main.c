@@ -58,26 +58,29 @@ twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
 uint32_t left = 0;
 uint32_t right = 0;
+uint32_t count = 0;
+uint32_t time_count = 0;
 int encoder_pos;
 bool g_flag_send_telemetry;
 
-// void append_telemetry_data(cJSON *json)
-// {
-//     cJSON_AddStringToObject(json, STR_TELEMETRY, "true");
-//     //cJSON_AddNumberToObject(json, "graph_count", graph_count);
-//     cJSON_AddNumberToObject(json, "encoder_pos", encoder_pos);
-// }
+void append_telemetry_data(cJSON *json)
+{
+    cJSON_AddStringToObject(json, "telemetry", "true");
+    //cJSON_AddNumberToObject(json, "graph_count", graph_count);
+    cJSON_AddNumberToObject(json, "time_count", time_count);
+    cJSON_AddNumberToObject(json, "encoder_pos", count);
+}
 
-// char* build_telemetry_string()
-// {
-//     cJSON *json = cJSON_CreateObject();
+char* build_telemetry_string()
+{
+    cJSON *json = cJSON_CreateObject();
 
-//     append_telemetry_data(json);
+    append_telemetry_data(json);
 
-//     char* str = cJSON_Print(json);
-//     cJSON_Delete(json);
-//     return str;
-// }
+    char* str = cJSON_Print(json);
+    cJSON_Delete(json);
+    return str;
+}
 
 // char* build_config_string(bool for_nvs)
 // {
@@ -224,6 +227,7 @@ bool calibrate()
     bool flag_received_quadrature = false;
     bool flag_received_wz = false;
     twai_message_t msg;
+
     esp_err_t err;
     for (int i = 0; i < 10; i++)
     {
@@ -363,19 +367,19 @@ bool calibrate()
 void app_main(void)
 {
     static const char *TAG = "app_main";
-    // t_eth_config config = {.ip = g_ip_addr, .pass = g_pass, .ssid = g_ssid, .use_eth = USE_COMMM_ETHERNET, .use_wifi_ap = USE_COMMM_WIFI_AP, .use_wifi_sta = USE_COMMM_WIFI_STA};
-    // eth_start(config);
+    t_eth_config config = {.ip = g_ip_addr, .pass = g_pass, .ssid = g_ssid, .use_eth = USE_COMMM_ETHERNET, .use_wifi_ap = USE_COMMM_WIFI_AP, .use_wifi_sta = USE_COMMM_WIFI_STA};
+    eth_start(config);
 
-    // TickType_t xLastWakeTime = xTaskGetTickCount();
+    TickType_t xLastWakeTime = xTaskGetTickCount();
 
-    // g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
-    // assert(g_command_queue != NULL);
+    g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
+    assert(g_command_queue != NULL);
 
-    // if (USE_COMMM_ETHERNET || USE_COMMM_WIFI_AP || USE_COMMM_WIFI_STA)
-    // {
-    //     xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 1, NULL);
-    //     xTaskCreate(udp_server_task, "udp_server", 4096, (void*)AF_INET, 1, NULL);
-    // }
+    if (USE_COMMM_ETHERNET || USE_COMMM_WIFI_AP || USE_COMMM_WIFI_STA)
+    {
+        // xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 1, NULL);
+        xTaskCreate(udp_server_task, "udp_server", 4096, (void*)AF_INET, 1, NULL);
+    }
 
     esp_err_t err;
 
@@ -398,39 +402,10 @@ void app_main(void)
         ESP_LOGI(TAG, "Started succesfully");
     }
 
-    bool calibrated_flag = calibrate();
-    if(calibrated_flag)
-    {
-        ESP_LOGI("app_main", "Calibrated succesfully");
-    }
-
-    // err = sc_cmd_write_ENCODER_BIAS(SC_ID, 0, pdMS_TO_TICKS(1000));
-       // err = sc_cmd_read_WORKZONE_COUNT(SC_ID, 1000);
-        // if(err != ESP_OK)
-        // {
-        //     ESP_LOGI(TAG, "Failed to transmit cmd (Workzone)");
-        // }
-
-        // if(twai_receive(&msg, 0) != ESP_OK)
-        // {
-        //     ESP_LOGI(TAG, "Failed to recieve");
-        // }
-        // else
-        // {
-        //     if(sc_decode_WORKZONE_COUNT(SC_ID, msg, &count))
-        //     {
-        //         ESP_LOGI(TAG, "Workzone: %i", count);
-        //         // ESP_LOGI("while", "Workzone: %02x %02x %02x %02x %02x %02x %02x %02x", msg.data[0], msg.data[1], msg.data[2], msg.data[3], msg.data[4],msg.data[5], msg.data[6],msg.data[7]);
-        //         // err = sc_cmd_write_WZ_OFFSET(SC_ID, count, pdMS_TO_TICKS(1000));
-        //         // if(err != ESP_OK)
-        //         // {
-        //         //     ESP_LOGI("while", "Failed to transmit cmd (WZ Offset)");
-        //         // }
-
-        //     }
-        // }    // if(err != ESP_OK)
+    // bool calibrated_flag = calibrate();
+    // if(calibrated_flag)
     // {
-    //     ESP_LOGI("Calibration", "Failed to transmit cmd (Write Bias)");
+    //     ESP_LOGI("app_main", "Calibrated succesfully");
     // }
 
     int counter = 0;
@@ -439,61 +414,34 @@ void app_main(void)
     bool g_flag_send_telemetry = false;
 
     twai_message_t msg;
-    int32_t count;
     while(1)
     {
+        time_count++;
         static const char *TAG = "while";
  
-        // ESP_LOGI("while", "Encoder: %02x %02x %02x %02x %02x %02x %02x %02x", msg.data[0], msg.data[1], msg.data[2], msg.data[3], msg.data[4],msg.data[5], msg.data[6],msg.data[7]);
-
-
-        // err = sc_cmd_read_LIMIT_SWITCH_NEG(SC_ID, 1000);
-        // if(err != ESP_OK)
-        // {
-        //     ESP_LOGI("while", "Failed to transmit cmd (Limit Switch Neg)");
-        // }
-
-        // if(twai_receive(&msg, 0) != ESP_OK)
-        // {
-        //     ESP_LOGI("while", "Failed to recieve");
-        // }
-        // else
-        // {
-        //     if(sc_decode_LIMIT_SWITCH_NEG(SC_ID, msg, &left) != true)
-        //     {
-        //         ESP_LOGI("while", "Failed to decode Switch Neg");
-        //     }
-        // }
-        // ESP_LOGI("while", "Left: %02x %02x %02x %02x %02x %02x %02x %02x", msg.data[0], msg.data[1], msg.data[2], msg.data[3], msg.data[4],msg.data[5], msg.data[6],msg.data[7]);
-
-        // err = sc_cmd_read_LIMIT_SWITCH_POS(SC_ID, 1000);
-        // if(err != ESP_OK)
-        // {
-        //     ESP_LOGI("while", "Failed to transmit cmd (Limit Switch Pos)");
-        // }
-
-        // if(twai_receive(&msg, 0) != ESP_OK)
-        // {
-        //     ESP_LOGI("while", "Failed to recieve");
-        // }
-        // else
-        // {
-        //     if(sc_decode_LIMIT_SWITCH_POS(SC_ID, msg, &right) != true)
-        //     {
-        //         ESP_LOGI("while", "Failed to decode Switch Pos");
-        //     }
-        // }
-        // ESP_LOGI("while", "Left = %d, Right = %d", left, right);
-        // ESP_LOGI("while", "Right: %02x %02x %02x %02x %02x %02x %02x %02x", msg.data[0], msg.data[1], msg.data[2], msg.data[3], msg.data[4],msg.data[5], msg.data[6],msg.data[7]);
-        
-        if(calibrated_flag)
+        err = sc_cmd_read_SAMPLE_NUM(SC_ID, 0);
+        if(err != ESP_OK)
         {
-            // err = sc_cmd_ESC_HZ(SC_ID, 1, pdMS_TO_TICKS(1000));
-            // if(err != ESP_OK)
-            // {
-            //     ESP_LOGI("while", "Failed to transmit cmd (HZ)");
-            // }
+            ESP_LOGI(TAG, "Failed to transmit cmd (Sample)");
+        }
 
+        if(twai_receive(&msg, 0) != ESP_OK)
+        {
+            ESP_LOGI(TAG, "Failed to recieve");
+        }
+        else
+        {
+            if(sc_decode_SAMPLE_NUM(SC_ID, msg, &count))
+            {
+                ESP_LOGI(TAG, "Sample: %i", count);
+                ESP_LOGI(TAG, "Sample: %02x %02x %02x %02x %02x %02x %02x %02x\n", msg.data[0], msg.data[1], msg.data[2], msg.data[3], msg.data[4],msg.data[5], msg.data[6],msg.data[7]);
+            }
+        }
+
+        // ESP_LOGI("while", "Encoder: %02x %02x %02x %02x %02x %02x %02x %02x", msg.data[0], msg.data[1], msg.data[2], msg.data[3], msg.data[4],msg.data[5], msg.data[6],msg.data[7]);
+        
+        if(0/*calibrated_flag*/)
+        {
             if((counter < 25) && (dir == 1))
             {
                 if (counter % 3 == 0)
@@ -548,37 +496,37 @@ void app_main(void)
             // }
 
         
-            // if (telemetry_counter++ >= 25)
-            // {
-            //     if (g_flag_send_telemetry)
-            //     {
-            //         char *telemetry_to_send = build_telemetry_string();
-            //         if (telemetry_to_send)
-            //         {
-            //             // Отправка телеметрии на последний известный адрес
-            //             int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-            //             if (sock >= 0)
-            //             {
-            //                 int err = sendto(sock, telemetry_to_send, strlen(telemetry_to_send), 0,
-            //                                  (struct sockaddr *)&g_last_cmd_source_addr, sizeof(struct sockaddr));
-            //                 if (err < 0)
-            //                 {
-            //                     // ESP_LOGW(TAG, "Failed to send telemetry: errno %d", errno);
-            //                 }
-            //                 else
-            //                 {
-            //                     // ESP_LOGI(TAG, "Telemetry sent: enc_pos=%d", enc_pos);
-            //                 }
-            //                 close(sock);
-            //             }
-            //             free(telemetry_to_send);
+            if (telemetry_counter++ >= 1)
+            {
+                if (g_flag_send_telemetry)
+                {
+                    char *telemetry_to_send = build_telemetry_string();
+                    if (telemetry_to_send)
+                    {
+                        // Отправка телеметрии на последний известный адрес
+                        int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+                        if (sock >= 0)
+                        {
+                            int err = sendto(sock, telemetry_to_send, strlen(telemetry_to_send), 0,
+                                             (struct sockaddr *)&g_last_cmd_source_addr, sizeof(struct sockaddr));
+                            if (err < 0)
+                            {
+                                // ESP_LOGW(TAG, "Failed to send telemetry: errno %d", errno);
+                            }
+                            else
+                            {
+                                // ESP_LOGI(TAG, "Telemetry sent: enc_pos=%d", enc_pos);
+                            }
+                            close(sock);
+                        }
+                        free(telemetry_to_send);
 
-            //         }
-            //                     // ESP_LOGI("111", "4");
+                    }
+                                // ESP_LOGI("111", "4");
 
-            //     }
-            //     telemetry_counter = 0;
-            // }
+                }
+                telemetry_counter = 0;
+            }
         
         }
         vTaskDelay(pdMS_TO_TICKS(30));
