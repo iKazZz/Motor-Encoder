@@ -38,6 +38,9 @@ esp_err_t sc_cmd_read_LIMIT_SWITCH_NEG(const uint32_t id, TickType_t timeout);
 bool sc_decode_LIMIT_SWITCH_NEG(uint32_t id, const twai_message_t msg, uint32_t *pCount);
 esp_err_t sc_cmd_read_LIMIT_SWITCH_POS(const uint32_t id, TickType_t timeout);
 bool sc_decode_LIMIT_SWITCH_POS(uint32_t id, const twai_message_t msg, uint32_t *pCount);
+esp_err_t sc_cmd_write_WZ_OFFSET(const uint32_t id, uint32_t count, TickType_t timeout);
+esp_err_t sc_cmd_read_WORKZONE_COUNT(const uint32_t id, TickType_t timeout);
+bool sc_decode_WORKZONE_COUNT(uint32_t id, const twai_message_t msg, int32_t *pCount);
 
 
 

@@ -36,9 +36,6 @@
 #define SC25_TELEMETRY_INDEX_QUADRATURE_COUNT               (0x500A)
 #define SC25_TELEMETRY_SUB_INDEX_QUADRATURE_COUNT           (0x06)
 
-#define SC25_TELEMETRY_INDEX_QUADRATURE_COUNT               (0x500A)
-#define SC25_TELEMETRY_SUB_INDEX_QUADRATURE_COUNT           (0x06)
-
 #define SC25_TELEMETRY_INDEX_MODULO_COUNT                   (0x4000)
 #define SC25_TELEMETRY_SUB_INDEX_MODULO_COUNT               (0x1A)
 
@@ -46,8 +43,18 @@
 #define SC25_TELEMETRY_SUB_INDEX_LIMIT_SWITCH_NEG           (0x05)
 #define SC25_TELEMETRY_SUB_INDEX_LIMIT_SWITCH_POS           (0x06)
 
+#define SC25_TELEMETRY_INDEX_DFCPOS                         (0x4008)
+#define SC25_TELEMETRY_SUB_INDEX_DFCPOS                     (0x03)
+
 #define SC25_CONFIG_INDEX_ENCODER_BIAS                      (0x3011)
 #define SC25_CONFIG_SUB_INDEX_ENCODER_BIAS                  (0x03)
 
 #define SC25_COB_READ_RESPONSE                              (0x580)
 #define SC25_CMD_RESPONSE_4B                                (0x43)
+#define SC25_CMD_RESPONSE_2B                                (0x4B)
+
+#define SC25_CONFIG_INDEX_WZ_OFFSET                         (0x2034)
+#define SC25_CONFIG_SUB_INDEX_WZ_OFFSET                     (0xB0)
+
+#define SC25_TELEMETRY_INDEX_WORKZONE_COUNT                 (0x4000)
+#define SC25_TELEMETRY_SUB_INDEX_WORKZONE_COUNT             (0x19)
