@@ -61,3 +61,6 @@
 
 #define SC25_TELEMETRY_INDEX_SAMPLE_NUM                     (0x4000)
 #define SC25_TELEMETRY_SUB_INDEX_SAMPLE_NUM                 (0x04)
+
+#define SC25_COB_SERVO_LINEAR                               (0x300)
+#define SC25_CMD_SERVO_LINEAR                               (0x38)

@@ -515,3 +515,23 @@ bool sc_decode_SAMPLE_NUM(uint32_t id, const twai_message_t msg, uint32_t *pCoun
 
   return true;
 }
+
+esp_err_t sc_cmd_SERVO_LINEAR(const uint32_t id, const uint8_t feed_rate_extra_bits, const uint16_t feed_rate, const uint32_t count, TickType_t timeout)
+{
+    const twai_message_t message = {
+    // Message type and format settings
+    .extd = 0,              // Standard Format message (11-bit ID)
+    .rtr = 0,               // Send a data frame
+    .ss = 1,                // Is single shot (won't retry on error or NACK)
+    .self = 0,              // Not a self reception request
+    .dlc_non_comp = 0,      // DLC is less than 8
+
+    // Message ID and payload
+    .identifier = id + SC25_COB_SERVO_LINEAR,
+    .data_length_code = 8,
+    .data = {SC25_CMD_SERVO_LINEAR, *((uint8_t*)&feed_rate_extra_bits), *((uint8_t*)&feed_rate), *((uint8_t*)&feed_rate + 1), 
+             *((uint8_t*)&count), *((uint8_t*)&count + 1), *((uint8_t*)&count + 2), *((uint8_t*)&count + 3)}
+    };
+
+    return twai_transmit(&message, timeout);
+}

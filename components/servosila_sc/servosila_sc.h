@@ -43,6 +43,7 @@ esp_err_t sc_cmd_read_WORKZONE_COUNT(const uint32_t id, TickType_t timeout);
 bool sc_decode_WORKZONE_COUNT(uint32_t id, const twai_message_t msg, int32_t *pCount);
 esp_err_t sc_cmd_read_SAMPLE_NUM(const uint32_t id, TickType_t timeout);
 bool sc_decode_SAMPLE_NUM(uint32_t id, const twai_message_t msg, uint32_t *pCount);
+esp_err_t sc_cmd_SERVO_LINEAR(const uint32_t id, const uint8_t feed_rate_extra_bits, const uint16_t feed_rate, const uint32_t count, TickType_t timeout);
 
 
 #ifdef __cplusplus
