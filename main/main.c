@@ -24,6 +24,11 @@
 #include "servosila_sc.h"
 #include <cJSON.h>
 #include <math.h>
+#include "driver/mcpwm_timer.h"
+#include "driver/mcpwm_oper.h"
+#include "driver/mcpwm_cmpr.h"
+#include "driver/mcpwm_gen.h"
+
 
 #ifndef max
     #define max(a,b)            (((a) > (b)) ? (a) : (b))
@@ -305,28 +310,6 @@ void command_processing_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-static void IRAM_ATTR funA(void *param)
-{
-    int a = gpio_get_level(PIN_A);
-    int b = gpio_get_level(PIN_B);
-
-    if (a == 1 && b == 1) encoder_pos-=1;
-    if (a == 1 && b == 0) encoder_pos+=1;
-    if (a == 0 && b == 1) encoder_pos+=1;
-    if (a == 0 && b == 0) encoder_pos-=1;
-}
-
-static void IRAM_ATTR funB(void *param)
-{
-    int a = gpio_get_level(PIN_A);
-    int b = gpio_get_level(PIN_B);
-
-    if (b == 1 && a == 1) encoder_pos+=1;
-    if (b == 1 && a == 0) encoder_pos-=1;
-    if (b == 0 && a == 1) encoder_pos-=1;
-    if (b == 0 && a == 0) encoder_pos+=1;
-}
-
 void IRAM_ATTR sense_stop_isr(void *arg)
 {
     BaseType_t flag_yield = 0;
@@ -345,36 +328,6 @@ void init_pins()
     gpio_reset_pin(PIN_TWO);
     gpio_set_direction(PIN_TWO, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_TWO, 0);
-
-    // gpio_reset_pin(PIN_STOP);
-    // gpio_set_direction(PIN_STOP, GPIO_MODE_INPUT);
-    // gpio_set_pull_mode(PIN_STOP, GPIO_PULLUP_ONLY);
-
-    // gpio_reset_pin(PIN_LED);
-    // gpio_set_direction(PIN_LED, GPIO_MODE_OUTPUT);
-    // gpio_set_level(PIN_LED, 1);
-
-    gpio_reset_pin(PIN_A);
-    gpio_set_direction(PIN_A, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(PIN_A, GPIO_PULLUP_ONLY);
-
-    gpio_reset_pin(PIN_B);
-    gpio_set_direction(PIN_B, GPIO_MODE_INPUT);
-    gpio_set_pull_mode(PIN_B, GPIO_PULLUP_ONLY);
-
-
-    //install gpio isr service
-    gpio_install_isr_service(0);
-
-    //hook isr handler for specific gpio pin
-    gpio_isr_handler_add(PIN_STOP, sense_stop_isr, xTaskGetCurrentTaskHandle());
-    gpio_set_intr_type(PIN_STOP, GPIO_INTR_ANYEDGE);
-
-    gpio_isr_handler_add(PIN_A, funA, 0);
-    gpio_set_intr_type(PIN_A, GPIO_INTR_ANYEDGE);
-
-    gpio_isr_handler_add(PIN_B, funB, 0);
-    gpio_set_intr_type(PIN_B, GPIO_INTR_ANYEDGE);
 }
 
 void nvs_read_config()
@@ -519,8 +472,8 @@ void app_main(void)
         .timer_sel      = LEDC_TIMER_0,
         .intr_type      = LEDC_INTR_DISABLE,
         .gpio_num       = PIN_ONE,
-        // .duty           = (int)(pow(2, DUTY_RESOLUTION_BIT - 1)),
-        .duty           = 0,
+        .duty           = (int)(pow(2, DUTY_RESOLUTION_BIT - 2)),
+        // .duty           = 0,
         .hpoint         = 0
     };
 
@@ -537,121 +490,22 @@ void app_main(void)
     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel1));
     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel2));
 
+    mcpwm_timer_handle_t mcpwm_timer;
+    mcpwm_timer_config_t mcpwm_timer_config= {
+        .group_id = 0,
+        .clk_src = 0,
+        .resolution_hz = 1000,
+        .count_mode = MCPWM_TIMER_COUNT_MODE_UP,
+        .period_ticks = (uint32_t)(32000),
+        .intr_priority = 0,
+    };
 
-    ESP_LOGI(TAG, "PID control task started");
-
+    mcpwm_oper_handle_t mcpwm_oper;
+    mcpwm_new
+    
+    mcpwm_new_timer(&mcpwm_timer_config, &mcpwm_timer);
     while (1)
     {
-        if (time_count < time_count_max) time_count += 1;
-        else time_count = 0;
-        signed int r = goal_pos - encoder_pos; 
-        // ESP_LOGI(TAG, "encoder_pos=%i, goal_pos=%i, r=%i", encoder_pos, goal_pos, r);
-
-        if (abs(r) > dead_zone) 
-        {      
-            // if (timer_paused) 
-            // {
-            //     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, (int)(pow(2, DUTY_RESOLUTION_BIT - 1)));  
-            //     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-            //     timer_paused = false;
-            // }
-
-            p_term = kp * r;
-            
-            u_integral += r;
-            // u_integral = (u_integral > u_integral_max) ? u_integral_max : (u_integral < -u_integral_max) ? -u_integral_max : u_integral;
-            i_term = ki * u_integral;
-            if (i_term > i_term_max)
-            {
-                i_term = i_term_max;
-                u_integral = (int)(i_term_max / ki);
-            }
-            else if (i_term < -i_term_max)
-            {
-                i_term = -i_term_max;
-                u_integral = (int)(-i_term_max / ki);
-            }
-            
-            d_term = kd * (r - u_prev_error);
-            u_prev_error = r;
-            
-            u = p_term + i_term + d_term + kg * encoder_pos;
-            
-            u = (u > u_max) ? u_max : (u < -u_max) ? -u_max : u;
-           
-            duty = min(pow(2, DUTY_RESOLUTION_BIT), (int)fabs(u));
-            duty_ratio = (float)duty / pow(2, DUTY_RESOLUTION_BIT);
-            // if (duty < min_freq) duty = min_freq;
-            
-            // duty_ratio = fmin(fmax(duty_ratio, 0.01), 0.5);
-            
-            if (u > 0)
-            {
-                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, 0);
-                ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-
-                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_TIMER_1, duty);
-                ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
-            }
-            else
-            {
-                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_TIMER_1, 0);
-                ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
-
-                ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, duty);
-                ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-            }
-        }
-        // else if (!timer_paused) 
-        // {
-        //     // Устанавливаем скважность 0% - нет импульсов, но таймер работает
-        //     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-        //     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-
-        //     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, 0);
-        //     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
-
-        //     timer_paused = true;
-        //     // ESP_LOGI(TAG, "Timer paused (duty=0)");
-        // }
-
-        if (log_count++ == 50) 
-        {
-            // ESP_LOGI(TAG, "s=%i, goal=%i, duty_ratio=%.2f\n", encoder_pos, goal_pos, duty_ratio);
-            log_count = 0;
-        }
-        if (telemetry_counter++ >= 25)
-        {
-            if (g_flag_send_telemetry)
-            {
-                char *telemetry_to_send = build_telemetry_string();
-                if (telemetry_to_send)
-                {
-                    // Отправка телеметрии на последний известный адрес
-                    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
-                    if (sock >= 0)
-                    {
-                        int err = sendto(sock, telemetry_to_send, strlen(telemetry_to_send), 0,
-                                         (struct sockaddr *)&g_last_cmd_source_addr, sizeof(struct sockaddr));
-                        if (err < 0)
-                        {
-                            // ESP_LOGI(TAG, "Failed to send telemetry: errno %d", errno);
-                        }
-                        else
-                        {
-                            // ESP_LOGI(TAG, "Telemetry sent: enc_pos=%d", encoder_pos);
-                        }
-                        close(sock);
-                    }
-                    free(telemetry_to_send);
-
-                }
-                            // ESP_LOGI("111", "4");
-
-            }
-            telemetry_counter = 0;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(10));
+       vTaskDelay(pdMS_TO_TICKS(10));
     }
  }

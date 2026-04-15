@@ -49,12 +49,8 @@
 #define STR_CMD_READ_FLASH      "restore_from_flash"
 #define STR_CMD_WRITE_FLASH     "save_to_flash"
 
-#define PIN_ONE                 (19)
+#define PIN_ONE                 (21)
 #define PIN_TWO                 (18)
-#define PIN_STOP                (15)
-#define PIN_LED                 (2)
-#define PIN_A                   (25)
-#define PIN_B                   (26)
 
 #define DUTY_RESOLUTION_BIT     (8)
 #define DEFAULT_PAUSE           (100)
