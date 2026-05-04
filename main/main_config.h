@@ -49,8 +49,11 @@
 #define STR_CMD_READ_FLASH      "restore_from_flash"
 #define STR_CMD_WRITE_FLASH     "save_to_flash"
 
-#define PIN_ONE                 (21)
-#define PIN_TWO                 (18)
+#define PIN_GHA                 (21)
+#define PIN_GLA                 ()
+
+#define PIN_GHB                 (19)
+#define PIN_GLB                 ()
 
 #define DUTY_RESOLUTION_BIT     (8)
 #define DEFAULT_PAUSE           (100)

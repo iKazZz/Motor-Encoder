@@ -113,15 +113,6 @@ static int time_count_max = 1000;
 int telemetry_counter = 0;   
 static bool timer_paused = false; 
 
-int u = 0;           
-int u_max = 2000;
-int u_integral = 0;
-int u_prev_error = 0;     
-signed int r = 0;      
-unsigned int dir = 1;           
-unsigned int duty = 0;
-float duty_ratio = 0;
-
 QueueHandle_t g_command_queue;
 
 bool g_flag_send_telemetry = true;
@@ -142,8 +133,8 @@ void append_telemetry_data(cJSON *json)
     cJSON_AddNumberToObject(json, "p_term", p_term);
     cJSON_AddNumberToObject(json, "i_term", i_term);
     cJSON_AddNumberToObject(json, "d_term", d_term);
-    cJSON_AddNumberToObject(json, "u", u);
-    cJSON_AddNumberToObject(json, "duty_ratio", duty_ratio);
+    // cJSON_AddNumberToObject(json, "u", u);
+    // cJSON_AddNumberToObject(json, "duty_ratio", duty_ratio);
 
 }
 
@@ -321,13 +312,13 @@ void IRAM_ATTR sense_stop_isr(void *arg)
 
 void init_pins()
 {
-    gpio_reset_pin(PIN_ONE);
-    gpio_set_direction(PIN_ONE, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_ONE, 0);
+    gpio_reset_pin(PIN_GHA);
+    gpio_set_direction(PIN_GHA, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_GHA, 0);
 
-    gpio_reset_pin(PIN_TWO);
-    gpio_set_direction(PIN_TWO, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_TWO, 0);
+    gpio_reset_pin(PIN_GHB);
+    gpio_set_direction(PIN_GHB, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_GHB, 0);
 }
 
 void nvs_read_config()
@@ -447,65 +438,124 @@ void app_main(void)
         xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 1, NULL);
         xTaskCreate(udp_server_task, "udp_server", 4096, (void*)AF_INET, 1, NULL);
     }
-    
-    ledc_timer_config_t ledc_timer1 = {
-        .speed_mode       = LEDC_LOW_SPEED_MODE,
-        .duty_resolution  = DUTY_RESOLUTION,
-        .timer_num        = LEDC_TIMER_0,
-        .freq_hz          = min_freq,
-        .clk_cfg          = LEDC_AUTO_CLK
-    };
 
-    ledc_timer_config_t ledc_timer2 = {
-        .speed_mode       = LEDC_LOW_SPEED_MODE,
-        .duty_resolution  = DUTY_RESOLUTION,
-        .timer_num        = LEDC_TIMER_1,
-        .freq_hz          = min_freq,
-        .clk_cfg          = LEDC_AUTO_CLK
-    };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer1));
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer2));
-
-    ledc_channel_config_t ledc_channel1 = {
-        .speed_mode     = LEDC_LOW_SPEED_MODE,
-        .channel        = LEDC_CHANNEL_0,
-        .timer_sel      = LEDC_TIMER_0,
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = PIN_ONE,
-        .duty           = (int)(pow(2, DUTY_RESOLUTION_BIT - 2)),
-        // .duty           = 0,
-        .hpoint         = 0
-    };
-
-    ledc_channel_config_t ledc_channel2 = {
-        .speed_mode     = LEDC_LOW_SPEED_MODE,
-        .channel        = LEDC_CHANNEL_1,
-        .timer_sel      = LEDC_TIMER_1,
-        .intr_type      = LEDC_INTR_DISABLE,
-        .gpio_num       = PIN_TWO,
-        // .duty           = (int)(pow(2, DUTY_RESOLUTION_BIT - 1)),
-        .duty           = 0,
-        .hpoint         = 0
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel1));
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel2));
-
+    int res = 100000;
+    int mcpwm_per = 100;
     mcpwm_timer_handle_t mcpwm_timer;
     mcpwm_timer_config_t mcpwm_timer_config= {
         .group_id = 0,
-        .clk_src = 0,
-        .resolution_hz = 1000,
-        .count_mode = MCPWM_TIMER_COUNT_MODE_UP,
-        .period_ticks = (uint32_t)(32000),
+        .clk_src = MCPWM_TIMER_CLK_SRC_PLL160M,
+        .resolution_hz = res,
+        .count_mode = MCPWM_TIMER_COUNT_MODE_UP_DOWN,
+        .period_ticks = mcpwm_per,
         .intr_priority = 0,
+
+        .flags.allow_pd = 0,
+        .flags.update_period_on_empty = 0,
+        .flags.update_period_on_sync = 0
     };
 
     mcpwm_oper_handle_t mcpwm_oper;
-    mcpwm_new
+    mcpwm_operator_config_t mcpwm_oper_config = {
+        .group_id = 0,
+        .intr_priority = 0,
+
+        .flags.update_gen_action_on_sync = 0,
+        .flags.update_gen_action_on_tep = 0,
+        .flags.update_gen_action_on_tez = 0
+    };
     
-    mcpwm_new_timer(&mcpwm_timer_config, &mcpwm_timer);
+    mcpwm_cmpr_handle_t mcpwm_cmpr1;
+    mcpwm_comparator_config_t mcpwm_cmpr1_config = {
+        .intr_priority = 0,
+
+        .flags.update_cmp_on_sync = 0,
+        .flags.update_cmp_on_tep = 0,
+        .flags.update_cmp_on_tez = 0
+    };
+
+    mcpwm_cmpr_handle_t mcpwm_cmpr2;
+    mcpwm_comparator_config_t mcpwm_cmpr2_config = {
+        .intr_priority = 0,
+
+        .flags.update_cmp_on_sync = 0,
+        .flags.update_cmp_on_tep = 0,
+        .flags.update_cmp_on_tez = 0
+    };
+
+    mcpwm_gen_handle_t mcpwm_gen1;
+    mcpwm_generator_config_t mcpwm_gen1_config = {
+        .gen_gpio_num = PIN_GHA,
+
+        .flags.invert_pwm = 0,
+        .flags.io_loop_back = 0,
+        .flags.pull_down = 0,
+        .flags.pull_up = 0
+    };
+
+    mcpwm_gen_handle_t mcpwm_gen2;
+    mcpwm_generator_config_t mcpwm_gen2_config = {
+        .gen_gpio_num = PIN_GHB,
+
+        .flags.invert_pwm = 0,
+        .flags.io_loop_back = 0,
+        .flags.pull_down = 0,
+        .flags.pull_up = 0
+    };
+    
+    ESP_ERROR_CHECK(mcpwm_new_timer(&mcpwm_timer_config, &mcpwm_timer));
+    ESP_ERROR_CHECK(mcpwm_new_operator(&mcpwm_oper_config, &mcpwm_oper));
+    ESP_ERROR_CHECK(mcpwm_new_comparator(mcpwm_oper, &mcpwm_cmpr1_config, &mcpwm_cmpr1));
+    ESP_ERROR_CHECK(mcpwm_new_comparator(mcpwm_oper, &mcpwm_cmpr2_config, &mcpwm_cmpr2));
+    ESP_ERROR_CHECK(mcpwm_new_generator(mcpwm_oper, &mcpwm_gen1_config, &mcpwm_gen1));
+    ESP_ERROR_CHECK(mcpwm_new_generator(mcpwm_oper, &mcpwm_gen2_config, &mcpwm_gen2));
+
+    ESP_ERROR_CHECK(mcpwm_operator_connect_timer(mcpwm_oper, mcpwm_timer));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_cmpr1, 0));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_cmpr2, 0));
+    // ESP_ERROR_CHECK(mcpwm_generator_set_action_on_timer_event(mcpwm_gen, MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, MCPWM_GEN_ACTION_HIGH)));
+    ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_gen1, MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, mcpwm_cmpr1, MCPWM_GEN_ACTION_LOW)));
+    ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_gen1, MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, mcpwm_cmpr1, MCPWM_GEN_ACTION_HIGH)));
+
+    ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_gen2, MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, mcpwm_cmpr2, MCPWM_GEN_ACTION_LOW)));
+    ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_gen2, MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, mcpwm_cmpr2, MCPWM_GEN_ACTION_HIGH)));
+
+
+    ESP_ERROR_CHECK(mcpwm_timer_enable(mcpwm_timer));
+    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
+
+    int duty = 0;
+    int delay_ms = 10;
+    int k = 0;
+    float phi = 0;
+    float freq = 0.5;
+    bool cmpr_1_active = 0;
     while (1)
     {
-       vTaskDelay(pdMS_TO_TICKS(10));
+        phi += 360 * freq / 1000 * delay_ms;
+        if(phi >= 360)
+        {
+            phi -= 360;
+        }
+        duty = (int)((sin(phi * M_PI / 180) / 16) * mcpwm_per / 2);
+        if(duty > 0)
+        {
+            if(!cmpr_1_active)
+            {
+                ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_cmpr2, 0));
+                cmpr_1_active = 1;
+            }
+            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_cmpr1, duty));
+        }
+        else if(duty < 0)
+        {
+            if(cmpr_1_active)
+            {
+                ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_cmpr1, 0));
+                cmpr_1_active = 0;
+            }
+            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_cmpr2, -duty));
+        }
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
  }
