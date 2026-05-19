@@ -55,6 +55,12 @@
 #define PIN_GHB                 (19)
 #define PIN_GLB                 ()
 
+#define PIN_GHC                 (18)
+#define PIN_GLC                 ()
+
+#define PIN_A                   (25)
+#define PIN_B                   (26)
+
 #define DUTY_RESOLUTION_BIT     (8)
 #define DEFAULT_PAUSE           (100)
 #define DEFAULT_CALIBRATION_TIMEOUT (100)

@@ -6,7 +6,13 @@
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/gptimer.h"
-#include "driver/ledc.h"
+// #include "driver/ledc.h"
+// #include "driver/mcpwm_timer.h"
+// #include "driver/mcpwm_oper.h"
+// #include "driver/mcpwm_cmpr.h"
+// #include "driver/mcpwm_gen.h"
+// #include "driver/twai.h"
+#include "driver/pulse_cnt.h"
 #include "esp_netif.h"
 #include "esp_eth.h"
 #include "esp_event.h"
@@ -20,14 +26,9 @@
 #include "lwip/sys.h"
 #include "nvs_flash.h"
 #include "nvs.h"
-#include "driver/twai.h"
 #include "servosila_sc.h"
 #include <cJSON.h>
 #include <math.h>
-#include "driver/mcpwm_timer.h"
-#include "driver/mcpwm_oper.h"
-#include "driver/mcpwm_cmpr.h"
-#include "driver/mcpwm_gen.h"
 
 
 #ifndef max
@@ -80,6 +81,22 @@
     #define DUTY_RESOLUTION LEDC_TIMER_20_BIT
 #endif
 
+typedef struct foc_uvw_coord {
+    float u;
+    float v;
+    float w;
+} foc_uvw_coord_t;
+
+typedef struct foc_ab_coord {
+    float alpha;
+    float beta;
+} foc_ab_coord_t;
+
+typedef struct foc_dq_coord {
+    float d;
+    float q;
+} foc_dq_coord_t;
+
 void nvs_read_config();
 void nvs_write_config();
 char* build_config_string(bool for_nvs);
@@ -114,6 +131,7 @@ int telemetry_counter = 0;
 static bool timer_paused = false; 
 
 QueueHandle_t g_command_queue;
+TickType_t xLastWakeTime;
 
 bool g_flag_send_telemetry = true;
 
@@ -130,9 +148,6 @@ void append_telemetry_data(cJSON *json)
     //cJSON_AddNumberToObject(json, "graph_count", graph_count);
     cJSON_AddNumberToObject(json, "encoder_pos", encoder_pos);
     cJSON_AddNumberToObject(json, "time_count", time_count);
-    cJSON_AddNumberToObject(json, "p_term", p_term);
-    cJSON_AddNumberToObject(json, "i_term", i_term);
-    cJSON_AddNumberToObject(json, "d_term", d_term);
     // cJSON_AddNumberToObject(json, "u", u);
     // cJSON_AddNumberToObject(json, "duty_ratio", duty_ratio);
 
@@ -215,39 +230,6 @@ void parse_config_string(const char *str)
             if (!strcmp(param_name, STR_PAUSE)) g_pause_ms = subitem->valueint;
             if (!strcmp(param_name, STR_CALIBRATION_TIMEOUT)) g_calibration_timeout_ms = subitem->valueint;
             if (!strcmp(param_name, STR_FLAG_SEND_TELEMETRY)) g_flag_send_telemetry = subitem->valueint;
-            // if (!strcmp(param_name, "goal_pos"))
-            // {
-            //     if (graph_count != subitem->valueint)
-            //     {
-            //         int i = 0;
-            //         while (i < GRAPH_ARRAY_SIZE)
-            //         {
-            //             char str[10];
-            //             itoa(time_arr[i], str, 10);
-            //             time_arr[i] = 0;
-            //             encoder_pos_arr[i] = 0;
-            //             i++;
-            //         }
-            //         graph_count = 0;
-            //     }
-            //     goal_pos = subitem->valueint;
-            // } 
-            if (!strcmp(param_name, "kp")) kp = subitem->valuedouble;
-            if (!strcmp(param_name, "ki")) ki = subitem->valuedouble;
-            if (!strcmp(param_name, "kd")) kd = subitem->valuedouble;
-            if (!strcmp(param_name, "kg")) kg = subitem->valuedouble;
-            if (!strcmp(param_name, "time_count_max")) time_count_max = subitem->valueint;
-            if (!strcmp(param_name, "dead_zone")) dead_zone = subitem->valueint;
-            if (!strcmp(param_name, "i_term_max")) i_term_max = subitem->valuedouble;
-            if (!strcmp(param_name, "goal_pos")) goal_pos = subitem->valueint;
-            // if (!strcmp(param_name, "duty")) duty = subitem->valueint;
-            if (!strcmp(param_name, "min_freq"))
-            {
-                min_freq = subitem->valueint;
-                ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_0, min_freq);
-                ledc_set_freq(LEDC_LOW_SPEED_MODE, LEDC_TIMER_1, min_freq);
-            } 
-            
 
             if (!strcmp(param_name, STR_CMD_READ_FLASH) && subitem->valueint) nvs_read_config();
             if (!strcmp(param_name, STR_CMD_WRITE_FLASH) && subitem->valueint) nvs_write_config();
@@ -319,6 +301,22 @@ void init_pins()
     gpio_reset_pin(PIN_GHB);
     gpio_set_direction(PIN_GHB, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_GHB, 0);
+
+    gpio_reset_pin(PIN_GHC);
+    gpio_set_direction(PIN_GHC, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_GHC, 0);
+
+    gpio_reset_pin(PIN_A);
+    gpio_set_direction(PIN_A, GPIO_MODE_INPUT);
+    gpio_input_enable(PIN_A);
+    gpio_set_pull_mode(PIN_A, GPIO_PULLUP_ONLY);
+    gpio_pullup_en(PIN_A);
+
+    gpio_reset_pin(PIN_B);
+    gpio_set_direction(PIN_B, GPIO_MODE_INPUT);
+    gpio_input_enable(PIN_B);
+    gpio_set_pull_mode(PIN_B, GPIO_PULLUP_ONLY);
+    gpio_pullup_en(PIN_B);
 }
 
 void nvs_read_config()
@@ -402,8 +400,22 @@ void nvs_write_config()
     }
 }
 
+void foc_inverse_park_transform(float phi, foc_dq_coord_t *dq, foc_ab_coord_t *ab)
+{
+    ab->alpha = dq->d * cos(phi) - dq->q * sin(phi);
+    ab->beta  = dq->q * cos(phi) + dq->d * sin(phi);
+}
+
+void foc_inverse_clark_transform(foc_ab_coord_t *ab, foc_uvw_coord_t *uvw)
+{
+    uvw->u = ab->alpha;
+    uvw->v = (ab->beta * sqrt(3) - ab->alpha) / 2;
+    uvw->w = -uvw->u - uvw->v; 
+}
+
 void app_main(void)
 {
+    xLastWakeTime = xTaskGetTickCount();
     init_pins();
     
     esp_err_t err = nvs_flash_init();
@@ -428,8 +440,6 @@ void app_main(void)
     };
     eth_start(config);
 
-    TickType_t xLastWakeTime = xTaskGetTickCount();
-
     g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
     assert(g_command_queue != NULL);
 
@@ -439,123 +449,158 @@ void app_main(void)
         xTaskCreate(udp_server_task, "udp_server", 4096, (void*)AF_INET, 1, NULL);
     }
 
-    int res = 100000;
-    int mcpwm_per = 100;
-    mcpwm_timer_handle_t mcpwm_timer;
-    mcpwm_timer_config_t mcpwm_timer_config= {
-        .group_id = 0,
-        .clk_src = MCPWM_TIMER_CLK_SRC_PLL160M,
-        .resolution_hz = res,
-        .count_mode = MCPWM_TIMER_COUNT_MODE_UP_DOWN,
-        .period_ticks = mcpwm_per,
-        .intr_priority = 0,
-
-        .flags.allow_pd = 0,
-        .flags.update_period_on_empty = 0,
-        .flags.update_period_on_sync = 0
+    pcnt_unit_config_t pcnt_unit_config = {
+        .low_limit = -10000,
+        .high_limit = 10000
     };
+    pcnt_unit_handle_t pcnt_unit;
+    ESP_ERROR_CHECK(pcnt_new_unit(&pcnt_unit_config, &pcnt_unit));
 
-    mcpwm_oper_handle_t mcpwm_oper;
-    mcpwm_operator_config_t mcpwm_oper_config = {
-        .group_id = 0,
-        .intr_priority = 0,
-
-        .flags.update_gen_action_on_sync = 0,
-        .flags.update_gen_action_on_tep = 0,
-        .flags.update_gen_action_on_tez = 0
+    pcnt_chan_config_t pcnt_chan_a_config = {
+        .edge_gpio_num = PIN_A,
+        .level_gpio_num = PIN_B
     };
+    pcnt_channel_handle_t pcnt_chan_a;
+    ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &pcnt_chan_a_config, &pcnt_chan_a));
+
+    pcnt_chan_config_t pcnt_chan_b_config = {
+        .edge_gpio_num = PIN_B,
+        .level_gpio_num = PIN_A
+    };
+    pcnt_channel_handle_t pcnt_chan_b;
+    ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &pcnt_chan_b_config, &pcnt_chan_b));
+
+    pcnt_glitch_filter_config_t pcnt_gf_config = {
+        .max_glitch_ns = 1000
+    };
+    ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(pcnt_unit, &pcnt_gf_config));
+
+    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_a, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
+    ESP_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_chan_a, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
+    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_b, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_DECREASE));
+    ESP_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_chan_b, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
+
+    ESP_ERROR_CHECK(pcnt_unit_enable(pcnt_unit));
+    ESP_ERROR_CHECK(pcnt_unit_clear_count(pcnt_unit));
+    ESP_ERROR_CHECK(pcnt_unit_start(pcnt_unit));
+
+    // int mcpwm_res = 20000000;
+    // int mcpwm_per = 1000;
+
+    // int mcpwm_gen_pins[3] = {PIN_GHA, PIN_GHB, PIN_GHC};
+
+    // mcpwm_timer_handle_t mcpwm_timer;
+    // mcpwm_oper_handle_t mcpwm_operators[3];
+    // mcpwm_cmpr_handle_t mcpwm_comparators[3];
+    // mcpwm_gen_handle_t mcpwm_generators[3];
+
+    // mcpwm_timer_config_t mcpwm_timer_config= {
+    //     .group_id = 0,
+    //     .clk_src = MCPWM_TIMER_CLK_SRC_DEFAULT,
+    //     .resolution_hz = mcpwm_res,
+    //     .count_mode = MCPWM_TIMER_COUNT_MODE_UP_DOWN,
+    //     .period_ticks = mcpwm_per,
+    //     .intr_priority = 0,
+
+    //     .flags.allow_pd = 0,
+    //     .flags.update_period_on_empty = 1,
+    //     .flags.update_period_on_sync = 0
+    // };
+
+    // mcpwm_operator_config_t mcpwm_oper_config = {
+    //     .group_id = 0,
+    //     .intr_priority = 0,
+
+    //     .flags.update_gen_action_on_sync = 0,
+    //     .flags.update_gen_action_on_tep = 0,
+    //     .flags.update_gen_action_on_tez = 1
+    // };
     
-    mcpwm_cmpr_handle_t mcpwm_cmpr1;
-    mcpwm_comparator_config_t mcpwm_cmpr1_config = {
-        .intr_priority = 0,
+    // mcpwm_comparator_config_t mcpwm_cmpr_config = {
+    //     .intr_priority = 0,
 
-        .flags.update_cmp_on_sync = 0,
-        .flags.update_cmp_on_tep = 0,
-        .flags.update_cmp_on_tez = 0
-    };
+    //     .flags.update_cmp_on_sync = 0,
+    //     .flags.update_cmp_on_tep = 0,
+    //     .flags.update_cmp_on_tez = 0
+    // };
 
-    mcpwm_cmpr_handle_t mcpwm_cmpr2;
-    mcpwm_comparator_config_t mcpwm_cmpr2_config = {
-        .intr_priority = 0,
+    // mcpwm_generator_config_t mcpwm_gen_config = {
+    //     .gen_gpio_num = 0,
 
-        .flags.update_cmp_on_sync = 0,
-        .flags.update_cmp_on_tep = 0,
-        .flags.update_cmp_on_tez = 0
-    };
-
-    mcpwm_gen_handle_t mcpwm_gen1;
-    mcpwm_generator_config_t mcpwm_gen1_config = {
-        .gen_gpio_num = PIN_GHA,
-
-        .flags.invert_pwm = 0,
-        .flags.io_loop_back = 0,
-        .flags.pull_down = 0,
-        .flags.pull_up = 0
-    };
-
-    mcpwm_gen_handle_t mcpwm_gen2;
-    mcpwm_generator_config_t mcpwm_gen2_config = {
-        .gen_gpio_num = PIN_GHB,
-
-        .flags.invert_pwm = 0,
-        .flags.io_loop_back = 0,
-        .flags.pull_down = 0,
-        .flags.pull_up = 0
-    };
+    //     .flags.invert_pwm = 0,
+    //     .flags.io_loop_back = 0,
+    //     .flags.pull_down = 0,
+    //     .flags.pull_up = 0
+    // };
     
-    ESP_ERROR_CHECK(mcpwm_new_timer(&mcpwm_timer_config, &mcpwm_timer));
-    ESP_ERROR_CHECK(mcpwm_new_operator(&mcpwm_oper_config, &mcpwm_oper));
-    ESP_ERROR_CHECK(mcpwm_new_comparator(mcpwm_oper, &mcpwm_cmpr1_config, &mcpwm_cmpr1));
-    ESP_ERROR_CHECK(mcpwm_new_comparator(mcpwm_oper, &mcpwm_cmpr2_config, &mcpwm_cmpr2));
-    ESP_ERROR_CHECK(mcpwm_new_generator(mcpwm_oper, &mcpwm_gen1_config, &mcpwm_gen1));
-    ESP_ERROR_CHECK(mcpwm_new_generator(mcpwm_oper, &mcpwm_gen2_config, &mcpwm_gen2));
+    // ESP_ERROR_CHECK(mcpwm_new_timer(&mcpwm_timer_config, &mcpwm_timer));
 
-    ESP_ERROR_CHECK(mcpwm_operator_connect_timer(mcpwm_oper, mcpwm_timer));
-    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_cmpr1, 0));
-    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_cmpr2, 0));
-    // ESP_ERROR_CHECK(mcpwm_generator_set_action_on_timer_event(mcpwm_gen, MCPWM_GEN_TIMER_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, MCPWM_TIMER_EVENT_EMPTY, MCPWM_GEN_ACTION_HIGH)));
-    ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_gen1, MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, mcpwm_cmpr1, MCPWM_GEN_ACTION_LOW)));
-    ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_gen1, MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, mcpwm_cmpr1, MCPWM_GEN_ACTION_HIGH)));
+    // for (int i = 0; i < 3; i++)
+    // {
+    //     ESP_ERROR_CHECK(mcpwm_new_operator(&mcpwm_oper_config, &mcpwm_operators[i]));
+    //     ESP_ERROR_CHECK(mcpwm_operator_connect_timer(mcpwm_operators[i], mcpwm_timer));
 
-    ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_gen2, MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, mcpwm_cmpr2, MCPWM_GEN_ACTION_LOW)));
-    ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_gen2, MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, mcpwm_cmpr2, MCPWM_GEN_ACTION_HIGH)));
+    //     ESP_ERROR_CHECK(mcpwm_new_comparator(mcpwm_operators[i], &mcpwm_cmpr_config, &mcpwm_comparators[i]));
+    //     ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], 0));
 
+    //     mcpwm_gen_config.gen_gpio_num = mcpwm_gen_pins[i];
+    //     ESP_ERROR_CHECK(mcpwm_new_generator(mcpwm_operators[i], &mcpwm_gen_config, &mcpwm_generators[i]));
 
-    ESP_ERROR_CHECK(mcpwm_timer_enable(mcpwm_timer));
-    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
+    //     ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_generators[i], MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, mcpwm_comparators[i], MCPWM_GEN_ACTION_LOW)));
+    //     ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_generators[i], MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, mcpwm_comparators[i], MCPWM_GEN_ACTION_HIGH)));
+    // }
 
-    int duty = 0;
-    int delay_ms = 10;
-    int k = 0;
-    float phi = 0;
-    float freq = 0.5;
-    bool cmpr_1_active = 0;
+    // ESP_ERROR_CHECK(mcpwm_timer_enable(mcpwm_timer));
+    // ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
+
+    // int duty_arr[3] = {0, 0, 0};
+    int delay_ms = 15;
+    // float electrical_phi_deg = 0;
+    // float electrical_phi_rad = 0;
+    // float electrical_freq = 2;
+
+    // float freq = 0.0;
+    // float phase = 0;
+
+    // foc_uvw_coord_t foc_uvw_coord = {0, 0, 0};
+    // foc_ab_coord_t foc_ab_coord = {0, 0};
+    // foc_dq_coord_t foc_dq_coord = {1, 0};
+
     while (1)
     {
-        phi += 360 * freq / 1000 * delay_ms;
-        if(phi >= 360)
+        xLastWakeTime = xTaskGetTickCount();
+        // electrical_phi_deg += (360 * electrical_freq / 1000 * delay_ms);
+        // if(electrical_phi_deg >= 360)
+        // {
+        //     electrical_phi_deg -= 360;
+        // }
+        // // electrical_phi_deg = 30;
+        // electrical_phi_rad = electrical_phi_deg * M_PI / 180;
+        // // ESP_LOGI("FOC", "d = %.2f, q = %.2f", foc_dq_coord.d, foc_dq_coord.q);
+        // foc_inverse_park_transform(electrical_phi_rad, &foc_dq_coord, &foc_ab_coord);
+        // ESP_LOGI("FOC", "a = %.2f, b = %.2f", foc_ab_coord.alpha, foc_ab_coord.beta);
+        // foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
+        // ESP_LOGI("FOC", "u = %.2f, v = %.2f, w = %.2f", foc_uvw_coord.u, foc_uvw_coord.v, foc_uvw_coord.w);
+
+        // duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
+        // duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
+        // duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
+
+        // for (int i = 0; i < 3; i++)
+        // {
+        //     ESP_LOGI("ABC", "A = %d, B = %d, C = %d", duty_arr[0], duty_arr[1], duty_arr[2]);
+        //     ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], duty_arr[i]));
+        // }
+
+        int count;
+        for (int i = 0; i < 50; i++)
         {
-            phi -= 360;
+            ESP_ERROR_CHECK(pcnt_unit_get_count(pcnt_unit, &count));
+            ESP_LOGI("Encoder", "count = %d", count);
         }
-        duty = (int)((sin(phi * M_PI / 180) / 16) * mcpwm_per / 2);
-        if(duty > 0)
-        {
-            if(!cmpr_1_active)
-            {
-                ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_cmpr2, 0));
-                cmpr_1_active = 1;
-            }
-            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_cmpr1, duty));
-        }
-        else if(duty < 0)
-        {
-            if(cmpr_1_active)
-            {
-                ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_cmpr1, 0));
-                cmpr_1_active = 0;
-            }
-            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_cmpr2, -duty));
-        }
+
+
+        // vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(delay_ms));
         vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
  }
