@@ -123,6 +123,56 @@ pcnt_glitch_filter_config_t pcnt_gf_config = {
     .max_glitch_ns = 1000
 };
 
+// MCPWM
+
+int mcpwm_res = 20000000;
+int mcpwm_per = 1000;
+
+int mcpwm_gen_pins[3] = {PIN_GHA, PIN_GHB, PIN_GHC};
+mcpwm_timer_handle_t mcpwm_timer;
+mcpwm_oper_handle_t mcpwm_operators[3];
+mcpwm_cmpr_handle_t mcpwm_comparators[3];
+mcpwm_gen_handle_t mcpwm_generators[3];
+
+mcpwm_timer_config_t mcpwm_timer_config= {
+    .group_id = 0,
+    .clk_src = MCPWM_TIMER_CLK_SRC_DEFAULT,
+    .resolution_hz = mcpwm_res,
+    .count_mode = MCPWM_TIMER_COUNT_MODE_UP_DOWN,
+    .period_ticks = mcpwm_per,
+    .intr_priority = 0,
+
+    .flags.allow_pd = 0,
+    .flags.update_period_on_empty = 1,
+    .flags.update_period_on_sync = 0
+};
+
+mcpwm_operator_config_t mcpwm_oper_config = {
+    .group_id = 0,
+    .intr_priority = 0,
+
+    .flags.update_gen_action_on_sync = 0,
+    .flags.update_gen_action_on_tep = 0,
+    .flags.update_gen_action_on_tez = 1
+};
+
+mcpwm_comparator_config_t mcpwm_cmpr_config = {
+    .intr_priority = 0,
+
+    .flags.update_cmp_on_sync = 0,
+    .flags.update_cmp_on_tep = 0,
+    .flags.update_cmp_on_tez = 0
+};
+
+mcpwm_generator_config_t mcpwm_gen_config = {
+    .gen_gpio_num = 0,
+
+    .flags.invert_pwm = 0,
+    .flags.io_loop_back = 0,
+    .flags.pull_down = 0,
+    .flags.pull_up = 0
+};
+
 // PID
 
 float pid_kp = 0;
@@ -442,6 +492,46 @@ void foc_inverse_clark_transform(foc_ab_coord_t *ab, foc_uvw_coord_t *uvw)
     uvw->w = -uvw->u - uvw->v; 
 }
 
+void pcnt_init()
+{
+    ESP_ERROR_CHECK(pcnt_new_unit(&pcnt_unit_config, &pcnt_unit));
+    ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &pcnt_chan_a_config, &pcnt_chan_a));
+    ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &pcnt_chan_b_config, &pcnt_chan_b));
+    ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(pcnt_unit, &pcnt_gf_config));
+
+    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_a, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
+    ESP_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_chan_a, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
+    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_b, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_DECREASE));
+    ESP_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_chan_b, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
+
+    ESP_ERROR_CHECK(pcnt_unit_enable(pcnt_unit));
+    ESP_ERROR_CHECK(pcnt_unit_clear_count(pcnt_unit));
+    ESP_ERROR_CHECK(pcnt_unit_start(pcnt_unit));
+}
+
+void mcpwm_init()
+{
+    ESP_ERROR_CHECK(mcpwm_new_timer(&mcpwm_timer_config, &mcpwm_timer));
+
+    for (int i = 0; i < 3; i++)
+    {
+        ESP_ERROR_CHECK(mcpwm_new_operator(&mcpwm_oper_config, &mcpwm_operators[i]));
+        ESP_ERROR_CHECK(mcpwm_operator_connect_timer(mcpwm_operators[i], mcpwm_timer));
+
+        ESP_ERROR_CHECK(mcpwm_new_comparator(mcpwm_operators[i], &mcpwm_cmpr_config, &mcpwm_comparators[i]));
+        ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], 0));
+
+        mcpwm_gen_config.gen_gpio_num = mcpwm_gen_pins[i];
+        ESP_ERROR_CHECK(mcpwm_new_generator(mcpwm_operators[i], &mcpwm_gen_config, &mcpwm_generators[i]));
+
+        ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_generators[i], MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, mcpwm_comparators[i], MCPWM_GEN_ACTION_LOW)));
+        ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_generators[i], MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, mcpwm_comparators[i], MCPWM_GEN_ACTION_HIGH)));
+    }
+
+    ESP_ERROR_CHECK(mcpwm_timer_enable(mcpwm_timer));
+    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
+}
+
 void app_main(void)
 {
     xLastWakeTime = xTaskGetTickCount();
@@ -478,127 +568,45 @@ void app_main(void)
         xTaskCreate(udp_server_task, "udp_server", 4096, (void*)AF_INET, 1, NULL);
     }
 
-    ESP_ERROR_CHECK(pcnt_new_unit(&pcnt_unit_config, &pcnt_unit));
-    ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &pcnt_chan_a_config, &pcnt_chan_a));
-    ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &pcnt_chan_b_config, &pcnt_chan_b));
-    ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(pcnt_unit, &pcnt_gf_config));
+    pcnt_init();
 
-    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_a, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
-    ESP_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_chan_a, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
-    ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_b, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_DECREASE));
-    ESP_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_chan_b, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
+    mcpwm_init();
 
-    ESP_ERROR_CHECK(pcnt_unit_enable(pcnt_unit));
-    ESP_ERROR_CHECK(pcnt_unit_clear_count(pcnt_unit));
-    ESP_ERROR_CHECK(pcnt_unit_start(pcnt_unit));
-
-    // int mcpwm_res = 20000000;
-    // int mcpwm_per = 1000;
-
-    // int mcpwm_gen_pins[3] = {PIN_GHA, PIN_GHB, PIN_GHC};
-
-    // mcpwm_timer_handle_t mcpwm_timer;
-    // mcpwm_oper_handle_t mcpwm_operators[3];
-    // mcpwm_cmpr_handle_t mcpwm_comparators[3];
-    // mcpwm_gen_handle_t mcpwm_generators[3];
-
-    // mcpwm_timer_config_t mcpwm_timer_config= {
-    //     .group_id = 0,
-    //     .clk_src = MCPWM_TIMER_CLK_SRC_DEFAULT,
-    //     .resolution_hz = mcpwm_res,
-    //     .count_mode = MCPWM_TIMER_COUNT_MODE_UP_DOWN,
-    //     .period_ticks = mcpwm_per,
-    //     .intr_priority = 0,
-
-    //     .flags.allow_pd = 0,
-    //     .flags.update_period_on_empty = 1,
-    //     .flags.update_period_on_sync = 0
-    // };
-
-    // mcpwm_operator_config_t mcpwm_oper_config = {
-    //     .group_id = 0,
-    //     .intr_priority = 0,
-
-    //     .flags.update_gen_action_on_sync = 0,
-    //     .flags.update_gen_action_on_tep = 0,
-    //     .flags.update_gen_action_on_tez = 1
-    // };
-    
-    // mcpwm_comparator_config_t mcpwm_cmpr_config = {
-    //     .intr_priority = 0,
-
-    //     .flags.update_cmp_on_sync = 0,
-    //     .flags.update_cmp_on_tep = 0,
-    //     .flags.update_cmp_on_tez = 0
-    // };
-
-    // mcpwm_generator_config_t mcpwm_gen_config = {
-    //     .gen_gpio_num = 0,
-
-    //     .flags.invert_pwm = 0,
-    //     .flags.io_loop_back = 0,
-    //     .flags.pull_down = 0,
-    //     .flags.pull_up = 0
-    // };
-    
-    // ESP_ERROR_CHECK(mcpwm_new_timer(&mcpwm_timer_config, &mcpwm_timer));
-
-    // for (int i = 0; i < 3; i++)
-    // {
-    //     ESP_ERROR_CHECK(mcpwm_new_operator(&mcpwm_oper_config, &mcpwm_operators[i]));
-    //     ESP_ERROR_CHECK(mcpwm_operator_connect_timer(mcpwm_operators[i], mcpwm_timer));
-
-    //     ESP_ERROR_CHECK(mcpwm_new_comparator(mcpwm_operators[i], &mcpwm_cmpr_config, &mcpwm_comparators[i]));
-    //     ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], 0));
-
-    //     mcpwm_gen_config.gen_gpio_num = mcpwm_gen_pins[i];
-    //     ESP_ERROR_CHECK(mcpwm_new_generator(mcpwm_operators[i], &mcpwm_gen_config, &mcpwm_generators[i]));
-
-    //     ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_generators[i], MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_UP, mcpwm_comparators[i], MCPWM_GEN_ACTION_LOW)));
-    //     ESP_ERROR_CHECK(mcpwm_generator_set_action_on_compare_event(mcpwm_generators[i], MCPWM_GEN_COMPARE_EVENT_ACTION(MCPWM_TIMER_DIRECTION_DOWN, mcpwm_comparators[i], MCPWM_GEN_ACTION_HIGH)));
-    // }
-
-    // ESP_ERROR_CHECK(mcpwm_timer_enable(mcpwm_timer));
-    // ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
-
-    // int duty_arr[3] = {0, 0, 0};
     int delay_ms = 15;
-    // float electrical_phi_deg = 0;
-    // float electrical_phi_rad = 0;
-    // float electrical_freq = 2;
+    int foc_duty_arr[3] = {0, 0, 0};
+    float foc_el_phi_deg = 0;
+    float foc_el_phi_rad = 0;
+    float foc_el_freq = 2;
 
-    // float freq = 0.0;
-    // float phase = 0;
-
-    // foc_uvw_coord_t foc_uvw_coord = {0, 0, 0};
-    // foc_ab_coord_t foc_ab_coord = {0, 0};
-    // foc_dq_coord_t foc_dq_coord = {1, 0};
+    foc_uvw_coord_t foc_uvw_coord = {0, 0, 0};
+    foc_ab_coord_t foc_ab_coord = {0, 0};
+    foc_dq_coord_t foc_dq_coord = {1, 0};
 
     while (1)
     {
         xLastWakeTime = xTaskGetTickCount();
-        // electrical_phi_deg += (360 * electrical_freq / 1000 * delay_ms);
-        // if(electrical_phi_deg >= 360)
-        // {
-        //     electrical_phi_deg -= 360;
-        // }
-        // // electrical_phi_deg = 30;
-        // electrical_phi_rad = electrical_phi_deg * M_PI / 180;
-        // // ESP_LOGI("FOC", "d = %.2f, q = %.2f", foc_dq_coord.d, foc_dq_coord.q);
-        // foc_inverse_park_transform(electrical_phi_rad, &foc_dq_coord, &foc_ab_coord);
-        // ESP_LOGI("FOC", "a = %.2f, b = %.2f", foc_ab_coord.alpha, foc_ab_coord.beta);
-        // foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
-        // ESP_LOGI("FOC", "u = %.2f, v = %.2f, w = %.2f", foc_uvw_coord.u, foc_uvw_coord.v, foc_uvw_coord.w);
+        foc_el_phi_deg += (360 * foc_el_freq / 1000 * delay_ms);
+        if(foc_el_phi_deg >= 360)
+        {
+            foc_el_phi_deg -= 360;
+        }
+        // foc_el_phi_deg = 30;
+        foc_el_phi_rad = foc_el_phi_deg * M_PI / 180;
+        // ESP_LOGI("FOC", "d = %.2f, q = %.2f", foc_dq_coord.d, foc_dq_coord.q);
+        foc_inverse_park_transform(foc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
+        ESP_LOGI("FOC", "a = %.2f, b = %.2f", foc_ab_coord.alpha, foc_ab_coord.beta);
+        foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
+        ESP_LOGI("FOC", "u = %.2f, v = %.2f, w = %.2f", foc_uvw_coord.u, foc_uvw_coord.v, foc_uvw_coord.w);
 
-        // duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
-        // duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
-        // duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
+        foc_duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
+        foc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
+        foc_duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
 
-        // for (int i = 0; i < 3; i++)
-        // {
-        //     ESP_LOGI("ABC", "A = %d, B = %d, C = %d", duty_arr[0], duty_arr[1], duty_arr[2]);
-        //     ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], duty_arr[i]));
-        // }
+        for (int i = 0; i < 3; i++)
+        {
+            ESP_LOGI("ABC", "A = %d, B = %d, C = %d", foc_duty_arr[0], foc_duty_arr[1], foc_duty_arr[2]);
+            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], foc_duty_arr[i]));
+        }
 
         int count;
         for (int i = 0; i < 50; i++)
