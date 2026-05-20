@@ -81,6 +81,8 @@
     #define DUTY_RESOLUTION LEDC_TIMER_20_BIT
 #endif
 
+// FOC
+
 typedef struct foc_uvw_coord {
     float u;
     float v;
@@ -97,6 +99,40 @@ typedef struct foc_dq_coord {
     float q;
 } foc_dq_coord_t;
 
+// Pulse counter
+
+pcnt_unit_config_t pcnt_unit_config = {
+    .low_limit = -10000,
+    .high_limit = 10000
+};
+pcnt_unit_handle_t pcnt_unit;
+
+pcnt_chan_config_t pcnt_chan_a_config = {
+    .edge_gpio_num = PIN_A,
+    .level_gpio_num = PIN_B
+};
+pcnt_channel_handle_t pcnt_chan_a;
+
+pcnt_chan_config_t pcnt_chan_b_config = {
+    .edge_gpio_num = PIN_B,
+    .level_gpio_num = PIN_A
+};
+pcnt_channel_handle_t pcnt_chan_b;
+
+pcnt_glitch_filter_config_t pcnt_gf_config = {
+    .max_glitch_ns = 1000
+};
+
+// PID
+
+float pid_kp = 0;
+float pid_ki = 0.0;
+float pid_kd = 0.0;
+
+static float u_integral_max = 100; 
+static float i_term_max = 100; 
+signed int goal_pos = 0;
+
 void nvs_read_config();
 void nvs_write_config();
 char* build_config_string(bool for_nvs);
@@ -110,18 +146,11 @@ char g_pass[64]     = DEFAULT_WIFI_STA_PASS;
 
 signed int encoder_pos = 0;
 unsigned int dead_zone = 0;
-float kp = 0;
-float ki = 0.0;
-float kd = 0.0;
-float kg = 0.0;
+
 
 float p_term = 0;
 float i_term = 0;
 float d_term = 0;
-float min_freq = 200;
-static float u_integral_max = 100; 
-static float i_term_max = 100; 
-signed int goal_pos = 0;
 int graph_count = 0;
 
 int log_count = 0;
@@ -430,7 +459,7 @@ void app_main(void)
 
     nvs_read_config();
 
-    t_eth_config config = {
+    t_eth_config eth_config = {
         .ip             = g_ip_addr, 
         .pass           = g_pass, 
         .ssid           = g_ssid, 
@@ -438,7 +467,7 @@ void app_main(void)
         .use_wifi_ap    = USE_COMMM_WIFI_AP, 
         .use_wifi_sta   = USE_COMMM_WIFI_STA
     };
-    eth_start(config);
+    eth_start(eth_config);
 
     g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
     assert(g_command_queue != NULL);
@@ -449,30 +478,9 @@ void app_main(void)
         xTaskCreate(udp_server_task, "udp_server", 4096, (void*)AF_INET, 1, NULL);
     }
 
-    pcnt_unit_config_t pcnt_unit_config = {
-        .low_limit = -10000,
-        .high_limit = 10000
-    };
-    pcnt_unit_handle_t pcnt_unit;
     ESP_ERROR_CHECK(pcnt_new_unit(&pcnt_unit_config, &pcnt_unit));
-
-    pcnt_chan_config_t pcnt_chan_a_config = {
-        .edge_gpio_num = PIN_A,
-        .level_gpio_num = PIN_B
-    };
-    pcnt_channel_handle_t pcnt_chan_a;
     ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &pcnt_chan_a_config, &pcnt_chan_a));
-
-    pcnt_chan_config_t pcnt_chan_b_config = {
-        .edge_gpio_num = PIN_B,
-        .level_gpio_num = PIN_A
-    };
-    pcnt_channel_handle_t pcnt_chan_b;
     ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &pcnt_chan_b_config, &pcnt_chan_b));
-
-    pcnt_glitch_filter_config_t pcnt_gf_config = {
-        .max_glitch_ns = 1000
-    };
     ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(pcnt_unit, &pcnt_gf_config));
 
     ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_a, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
