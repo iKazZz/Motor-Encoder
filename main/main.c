@@ -7,10 +7,10 @@
 #include "driver/gpio.h"
 #include "driver/gptimer.h"
 // #include "driver/ledc.h"
-// #include "driver/mcpwm_timer.h"
-// #include "driver/mcpwm_oper.h"
-// #include "driver/mcpwm_cmpr.h"
-// #include "driver/mcpwm_gen.h"
+#include "driver/mcpwm_timer.h"
+#include "driver/mcpwm_oper.h"
+#include "driver/mcpwm_cmpr.h"
+#include "driver/mcpwm_gen.h"
 // #include "driver/twai.h"
 #include "driver/pulse_cnt.h"
 #include "esp_netif.h"
@@ -125,8 +125,8 @@ pcnt_glitch_filter_config_t pcnt_gf_config = {
 
 // MCPWM
 
-int mcpwm_res = 20000000;
-int mcpwm_per = 1000;
+const uint32_t mcpwm_res = 20000000;
+const int mcpwm_per = 1000;
 
 int mcpwm_gen_pins[3] = {PIN_GHA, PIN_GHB, PIN_GHC};
 mcpwm_timer_handle_t mcpwm_timer;
@@ -254,14 +254,12 @@ char* build_config_string(bool for_nvs)
     cJSON_AddNumberToObject(json, STR_CALIBRATION_TIMEOUT, g_calibration_timeout_ms);
     cJSON_AddNumberToObject(json, STR_FLAG_SEND_TELEMETRY, g_flag_send_telemetry);
     cJSON_AddNumberToObject(json, "goal_pos", goal_pos);
-    cJSON_AddNumberToObject(json, "kp", kp);
-    cJSON_AddNumberToObject(json, "ki", ki);
-    cJSON_AddNumberToObject(json, "kd", kd);
-    cJSON_AddNumberToObject(json, "kg", kg);
+    cJSON_AddNumberToObject(json, "kp", pid_kp);
+    cJSON_AddNumberToObject(json, "ki", pid_ki);
+    cJSON_AddNumberToObject(json, "kd", pid_kd);
     cJSON_AddNumberToObject(json, "dead_zone", dead_zone);
     cJSON_AddNumberToObject(json, "time_count_max", time_count_max);
     cJSON_AddNumberToObject(json, "i_term_max", i_term_max);
-    cJSON_AddNumberToObject(json, "min_freq", min_freq);
     // cJSON_AddNumberToObject(json, "duty", duty);
 
     if (!for_nvs)
@@ -576,12 +574,13 @@ void app_main(void)
     int foc_duty_arr[3] = {0, 0, 0};
     float foc_el_phi_deg = 0;
     float foc_el_phi_rad = 0;
-    float foc_el_freq = 2;
+    float foc_el_freq = 4;
 
     foc_uvw_coord_t foc_uvw_coord = {0, 0, 0};
     foc_ab_coord_t foc_ab_coord = {0, 0};
     foc_dq_coord_t foc_dq_coord = {1, 0};
 
+    int log_timer = 0;
     while (1)
     {
         xLastWakeTime = xTaskGetTickCount();
@@ -590,13 +589,13 @@ void app_main(void)
         {
             foc_el_phi_deg -= 360;
         }
-        // foc_el_phi_deg = 30;
+        // foc_el_phi_deg = 0;
         foc_el_phi_rad = foc_el_phi_deg * M_PI / 180;
         // ESP_LOGI("FOC", "d = %.2f, q = %.2f", foc_dq_coord.d, foc_dq_coord.q);
         foc_inverse_park_transform(foc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
-        ESP_LOGI("FOC", "a = %.2f, b = %.2f", foc_ab_coord.alpha, foc_ab_coord.beta);
+        // ESP_LOGI("FOC", "a = %.2f, b = %.2f", foc_ab_coord.alpha, foc_ab_coord.beta);
         foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
-        ESP_LOGI("FOC", "u = %.2f, v = %.2f, w = %.2f", foc_uvw_coord.u, foc_uvw_coord.v, foc_uvw_coord.w);
+        // ESP_LOGI("FOC", "u = %.2f, v = %.2f, w = %.2f", foc_uvw_coord.u, foc_uvw_coord.v, foc_uvw_coord.w);
 
         foc_duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
         foc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
@@ -609,10 +608,15 @@ void app_main(void)
         }
 
         int count;
-        for (int i = 0; i < 50; i++)
+        if (log_timer == 50)
         {
             ESP_ERROR_CHECK(pcnt_unit_get_count(pcnt_unit, &count));
             ESP_LOGI("Encoder", "count = %d", count);
+            log_timer = 0;
+        }
+        else
+        {
+            log_timer++;
         }
 
 
