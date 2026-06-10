@@ -83,6 +83,12 @@
 
 // FOC
 
+int foc_duty_arr[3] = {0, 0, 0};
+float foc_el_phi_deg = 0;
+float foc_el_phi_rad = 0;
+float foc_el_freq = 4;
+int foc_bias = 0;
+
 typedef struct foc_uvw_coord {
     float u;
     float v;
@@ -99,11 +105,17 @@ typedef struct foc_dq_coord {
     float q;
 } foc_dq_coord_t;
 
+foc_uvw_coord_t foc_uvw_coord = {0, 0, 0};
+foc_ab_coord_t foc_ab_coord = {0, 0};
+foc_dq_coord_t foc_dq_coord = {1, 0};
+
 // Pulse counter
 
+int pcnt_pos = 0;
 pcnt_unit_config_t pcnt_unit_config = {
-    .low_limit = -10000,
-    .high_limit = 10000
+    .low_limit = -2400,
+    .high_limit = 2400,
+    .flags.accum_count = true,
 };
 pcnt_unit_handle_t pcnt_unit;
 
@@ -175,9 +187,22 @@ mcpwm_generator_config_t mcpwm_gen_config = {
 
 // PID
 
-float pid_kp = 0;
-float pid_ki = 0.0;
-float pid_kd = 0.0;
+int pid_pos = 0;
+int pid_goal = 2400;
+int pid_r = 0;
+int pid_r_prev = 0;
+
+float pid_kp = 10;
+float pid_ki = 0;
+float pid_kd = 0;
+
+float pid_up = 0;
+float pid_ui = 0;
+float pid_ud = 0;
+float pid_u = 0;
+
+float pid_u_max = 7200;
+int pid_dir = 1;
 
 static float u_integral_max = 100; 
 static float i_term_max = 100; 
@@ -211,6 +236,8 @@ static bool timer_paused = false;
 
 QueueHandle_t g_command_queue;
 TickType_t xLastWakeTime;
+TickType_t now;
+TickType_t prev;
 
 bool g_flag_send_telemetry = true;
 
@@ -496,6 +523,8 @@ void pcnt_init()
     ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &pcnt_chan_a_config, &pcnt_chan_a));
     ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &pcnt_chan_b_config, &pcnt_chan_b));
     ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(pcnt_unit, &pcnt_gf_config));
+    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(pcnt_unit, -2400));
+    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(pcnt_unit, 2400));
 
     ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_a, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
     ESP_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_chan_a, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
@@ -527,12 +556,41 @@ void mcpwm_init()
     }
 
     ESP_ERROR_CHECK(mcpwm_timer_enable(mcpwm_timer));
-    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
 }
+
+void calibration()
+{
+    ESP_LOGI("Calibration", "Started");
+    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
+
+    foc_el_phi_rad = 0;
+    foc_inverse_park_transform(foc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
+    foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
+
+    foc_duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
+    foc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
+    foc_duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
+
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[0], foc_duty_arr[0]));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[1], foc_duty_arr[1]));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[2], foc_duty_arr[2]));
+
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    ESP_ERROR_CHECK(pcnt_unit_get_count(pcnt_unit, &foc_bias));
+
+    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
+
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[0], 0));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[1], 0));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[2], 0));
+    ESP_LOGI("Calibration", "bias = %d", foc_bias);
+    ESP_LOGI("Calibration", "calibrated succesful");
+}
+
 
 void app_main(void)
 {
-    xLastWakeTime = xTaskGetTickCount();
+    prev = xTaskGetTickCount();
     init_pins();
     
     esp_err_t err = nvs_flash_init();
@@ -566,31 +624,61 @@ void app_main(void)
         xTaskCreate(udp_server_task, "udp_server", 4096, (void*)AF_INET, 1, NULL);
     }
 
+    vTaskDelay(pdMS_TO_TICKS(2000));
     pcnt_init();
 
     mcpwm_init();
 
-    int delay_ms = 15;
-    int foc_duty_arr[3] = {0, 0, 0};
-    float foc_el_phi_deg = 0;
-    float foc_el_phi_rad = 0;
-    float foc_el_freq = 4;
+    calibration();
 
-    foc_uvw_coord_t foc_uvw_coord = {0, 0, 0};
-    foc_ab_coord_t foc_ab_coord = {0, 0};
-    foc_dq_coord_t foc_dq_coord = {1, 0};
+    // int delay_ms = 15;
+    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
 
-    int log_timer = 0;
     while (1)
     {
-        xLastWakeTime = xTaskGetTickCount();
-        foc_el_phi_deg += (360 * foc_el_freq / 1000 * delay_ms);
+        ESP_ERROR_CHECK(pcnt_unit_get_count(pcnt_unit, &pcnt_pos));
+
+        // pid_r = pid_goal - pcnt_pos;
+        // if (pcnt_pos % 2400 == 0)
+        // {
+            // ESP_LOGI("Encoder", "pos = %d", pcnt_pos);
+        // }
+        // ESP_LOGI("Encoder", "pos = %d", pcnt_pos);
+
+        // pid_up = pid_kp * pid_r;
+        // pid_ui += pid_ki * pid_r;
+        // pid_ui = (pid_ui > 1000) ? 1000 : (pid_ui < -1000) ? -1000 : pid_ui;
+        // pid_ud = pid_kd * (pid_r - pid_r_prev);
+
+        // pid_u = pid_up + pid_ui + pid_ud;
+        // pid_r_prev = pid_r;
+
+        // pid_dir = (pid_u > 0) ? 1 : -1;
+        // pid_dir = 1;
+        // if (log_count >= 5000)
+        // {
+        //     // ESP_LOGI("While", "r = %d, u = %.2f, dir = %d", pid_r, pid_u, pid_dir);
+        //     // ESP_LOGI("Encoder", "pos = %d", pcnt_pos);
+        //     int32_t gg = (int32_t)(pcnt_pos * 1000 / ((int32_t)now-(int32_t)prev));
+        //     ESP_LOGI("Encoder", "speed = %d", gg);
+        // }
+        prev = now;
+        // pid_u = (abs(pid_u) > pid_u_max) ? pid_u_max : abs(pid_u);
+
+        foc_el_phi_deg = (float)(pcnt_pos - foc_bias) / 2400 * 360 * 14 + 90;
+        // foc_el_phi_deg += (360 * foc_el_freq / 1000 * 15);
+        // ESP_LOGI("FOC", "foc_el_phi_deg = %.2f", foc_el_phi_deg);
         if(foc_el_phi_deg >= 360)
         {
             foc_el_phi_deg -= 360;
         }
-        // foc_el_phi_deg = 0;
+        else if (foc_el_phi_deg <= -360)
+        {
+            foc_el_phi_deg += 360;
+        }
         foc_el_phi_rad = foc_el_phi_deg * M_PI / 180;
+        // foc_dq_coord.d = pid_u / pid_u_max;
+        // foc_dq_coord.d = 0.1;
         // ESP_LOGI("FOC", "d = %.2f, q = %.2f", foc_dq_coord.d, foc_dq_coord.q);
         foc_inverse_park_transform(foc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
         // ESP_LOGI("FOC", "a = %.2f, b = %.2f", foc_ab_coord.alpha, foc_ab_coord.beta);
@@ -601,26 +689,17 @@ void app_main(void)
         foc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
         foc_duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
 
+
         for (int i = 0; i < 3; i++)
         {
-            ESP_LOGI("ABC", "A = %d, B = %d, C = %d", foc_duty_arr[0], foc_duty_arr[1], foc_duty_arr[2]);
             ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], foc_duty_arr[i]));
         }
-
-        int count;
-        if (log_timer == 50)
+        if (log_count >= 5000)
         {
-            ESP_ERROR_CHECK(pcnt_unit_get_count(pcnt_unit, &count));
-            ESP_LOGI("Encoder", "count = %d", count);
-            log_timer = 0;
+            // ESP_LOGI("ABC", "A = %d, B = %d, C = %d", foc_duty_arr[0], foc_duty_arr[1], foc_duty_arr[2]);
         }
-        else
-        {
-            log_timer++;
-        }
-
-
+        log_count++;
         // vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(delay_ms));
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        // vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
  }
