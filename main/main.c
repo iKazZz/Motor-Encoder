@@ -11,6 +11,7 @@
 #include "driver/mcpwm_oper.h"
 #include "driver/mcpwm_cmpr.h"
 #include "driver/mcpwm_gen.h"
+#include "driver/mcpwm_cap.h"
 // #include "driver/twai.h"
 #include "driver/pulse_cnt.h"
 #include "esp_netif.h"
@@ -26,7 +27,7 @@
 #include "lwip/sys.h"
 #include "nvs_flash.h"
 #include "nvs.h"
-#include "servosila_sc.h"
+// #include "servosila_sc.h"
 #include <cJSON.h>
 #include <math.h>
 
@@ -39,47 +40,42 @@
     #define min(a,b)            (((a) < (b)) ? (a) : (b))
 #endif
 
-#if (DUTY_RESOLUTION_BIT == 1) 
-    #define DUTY_RESOLUTION LEDC_TIMER_1_BIT 
-#elif (DUTY_RESOLUTION_BIT == 2) 
-    #define DUTY_RESOLUTION LEDC_TIMER_2_BIT
-#elif (DUTY_RESOLUTION_BIT == 3) 
-    #define DUTY_RESOLUTION LEDC_TIMER_3_BIT
-#elif (DUTY_RESOLUTION_BIT == 4) 
-    #define DUTY_RESOLUTION LEDC_TIMER_4_BIT
-#elif (DUTY_RESOLUTION_BIT == 5) 
-    #define DUTY_RESOLUTION LEDC_TIMER_5_BIT
-#elif (DUTY_RESOLUTION_BIT == 6) 
-    #define DUTY_RESOLUTION LEDC_TIMER_6_BIT
-#elif (DUTY_RESOLUTION_BIT == 7) 
-    #define DUTY_RESOLUTION LEDC_TIMER_7_BIT
-#elif (DUTY_RESOLUTION_BIT == 8) 
-    #define DUTY_RESOLUTION LEDC_TIMER_8_BIT
-#elif (DUTY_RESOLUTION_BIT == 9) 
-    #define DUTY_RESOLUTION LEDC_TIMER_9_BIT
-#elif (DUTY_RESOLUTION_BIT == 10) 
-    #define DUTY_RESOLUTION LEDC_TIMER_10_BIT
-#elif (DUTY_RESOLUTION_BIT == 11) 
-    #define DUTY_RESOLUTION LEDC_TIMER_11_BIT
-#elif (DUTY_RESOLUTION_BIT == 12) 
-    #define DUTY_RESOLUTION LEDC_TIMER_12_BIT
-#elif (DUTY_RESOLUTION_BIT == 13) 
-    #define DUTY_RESOLUTION LEDC_TIMER_13_BIT
-#elif (DUTY_RESOLUTION_BIT == 14) 
-    #define DUTY_RESOLUTION LEDC_TIMER_14_BIT
-#elif (DUTY_RESOLUTION_BIT == 15) 
-    #define DUTY_RESOLUTION LEDC_TIMER_15_BIT
-#elif (DUTY_RESOLUTION_BIT == 16) 
-    #define DUTY_RESOLUTION LEDC_TIMER_16_BIT
-#elif (DUTY_RESOLUTION_BIT == 17) 
-    #define DUTY_RESOLUTION LEDC_TIMER_17_BIT
-#elif (DUTY_RESOLUTION_BIT == 18) 
-    #define DUTY_RESOLUTION LEDC_TIMER_18_BIT
-#elif (DUTY_RESOLUTION_BIT == 19) 
-    #define DUTY_RESOLUTION LEDC_TIMER_19_BIT
-#elif (DUTY_RESOLUTION_BIT == 20) 
-    #define DUTY_RESOLUTION LEDC_TIMER_20_BIT
-#endif
+bool flag_send_telemetry = false;
+bool current_telemetry = false;
+QueueHandle_t telemetry_queue;
+
+int num_command = 0;
+int current_task = 0;
+
+// GPTimer
+
+SemaphoreHandle_t gptimer_semaphore;
+
+gptimer_config_t gptimer_config = {
+    .clk_src = GPTIMER_CLK_SRC_DEFAULT,
+    .direction = GPTIMER_COUNT_UP,
+    .resolution_hz = 100000
+};
+gptimer_handle_t gptimer;
+
+gptimer_alarm_config_t gptimer_alarm_config = {
+    .reload_count = 0,
+    .alarm_count = 10,
+    .flags.auto_reload_on_alarm = true
+};
+
+bool gptimer_callback(gptimer_handle_t timer, const gptimer_alarm_event_data_t *edata, void *user_ctx)
+{
+    BaseType_t xHigherPriorityTaskWoke = pdFALSE;
+    xSemaphoreGiveFromISR(gptimer_semaphore, &xHigherPriorityTaskWoke);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoke);
+
+    return false;
+}
+
+gptimer_event_callbacks_t gptimer_callback_group = {
+    .on_alarm = gptimer_callback
+};
 
 // FOC
 
@@ -88,6 +84,7 @@ float foc_el_phi_deg = 0;
 float foc_el_phi_rad = 0;
 float foc_el_freq = 4;
 int foc_bias = 0;
+int foc_dir = 1;
 
 typedef struct foc_uvw_coord {
     float u;
@@ -111,11 +108,14 @@ foc_dq_coord_t foc_dq_coord = {1, 0};
 
 // Pulse counter
 
-int pcnt_pos = 0;
+volatile int pcnt_pos = 0;
+volatile int pcnt_pos_prev = 0;
+
 pcnt_unit_config_t pcnt_unit_config = {
-    .low_limit = -2400,
-    .high_limit = 2400,
+    .low_limit = -24000,
+    .high_limit = 24000,
     .flags.accum_count = true,
+    .intr_priority = 2
 };
 pcnt_unit_handle_t pcnt_unit;
 
@@ -135,7 +135,7 @@ pcnt_glitch_filter_config_t pcnt_gf_config = {
     .max_glitch_ns = 1000
 };
 
-// MCPWM
+// MCPWM (PWM)
 
 const uint32_t mcpwm_res = 20000000;
 const int mcpwm_per = 1000;
@@ -185,6 +185,99 @@ mcpwm_generator_config_t mcpwm_gen_config = {
     .flags.pull_up = 0
 };
 
+// MCPWM (Capture)
+
+bool flag_mcpwm_cap_activated = false;
+QueueHandle_t mcpwm_cap_queue;
+
+typedef struct mcpwm_cap_data {
+    int cur_pos;
+    int prev_pos;
+    int znak;
+    uint32_t cur_tick;
+    uint32_t prev_tick;
+    uint32_t per;
+
+} mcpwm_cap_data_t;
+
+mcpwm_cap_timer_handle_t mcpwm_cap_timer;
+mcpwm_cap_channel_handle_t mcpwm_cap_channel_A;
+mcpwm_cap_channel_handle_t mcpwm_cap_channel_B;
+
+mcpwm_capture_timer_config_t mcpwm_cap_timer_config = {
+    .clk_src = MCPWM_CAPTURE_CLK_SRC_DEFAULT,
+    .group_id = 0,
+    .resolution_hz = 4 * mcpwm_res
+};
+
+mcpwm_capture_channel_config_t mcpwm_cap_channel_A_config = {
+    .gpio_num = PIN_A,
+    .prescale = 1,
+    .intr_priority = 0,
+    .flags.pull_up = true,
+    .flags.pos_edge = true,
+    .flags.neg_edge = true
+};
+
+mcpwm_capture_channel_config_t mcpwm_cap_channel_B_config = {
+    .gpio_num = PIN_B,
+    .prescale = 1,  
+    .intr_priority = 0,
+    .flags.pull_up = true,
+    .flags.pos_edge = true,
+    .flags.neg_edge = true
+};
+
+volatile mcpwm_cap_data_t mcpwm_cap_data = {0, 0, 0, 0};
+
+bool aboba(mcpwm_cap_channel_handle_t chan, const mcpwm_capture_event_data_t *edata, void* userdata)
+{
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    mcpwm_cap_data.prev_pos = mcpwm_cap_data.cur_pos;
+    pcnt_unit_get_count(pcnt_unit, &(mcpwm_cap_data.cur_pos));
+    mcpwm_cap_data.prev_tick = mcpwm_cap_data.cur_tick;
+    mcpwm_cap_data.cur_tick = edata->cap_value;
+
+    mcpwm_cap_data.per = (mcpwm_cap_data.cur_tick - mcpwm_cap_data.prev_tick > 0) 
+    ? mcpwm_cap_data.cur_tick - mcpwm_cap_data.prev_tick 
+    : UINT32_MAX - mcpwm_cap_data.prev_tick + mcpwm_cap_data.cur_tick;
+
+    mcpwm_cap_data.znak = (mcpwm_cap_data.cur_pos > mcpwm_cap_data.prev_pos) ? 1 : -1;
+
+    if ((current_task == 2) || (current_task == 3)) xQueueOverwriteFromISR(mcpwm_cap_queue, &mcpwm_cap_data, &xHigherPriorityTaskWoken);
+    if (current_telemetry) xQueueOverwriteFromISR(telemetry_queue, &mcpwm_cap_data, &xHigherPriorityTaskWoken);
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+
+    return false;
+}
+
+mcpwm_capture_event_callbacks_t aaa = {
+    .on_cap = aboba
+};
+
+// ESC
+
+double esc_speed = 0;
+double esc_goal = 1;
+double esc_r = 0;
+double esc_kp = 0.1;
+double esc_ki = 0.1;
+double esc_gamma = 0.8;
+float esc_koef = 1;
+
+double esc_up = 0;
+double esc_ui = 0;
+double esc_ui_max = 10;
+double esc_u = 0;
+double esc_u_max = 10;
+int esc_dir = 1;
+
+double esc_avg = 0;
+double esc_avg_prev = 0;
+
+double speed_coef = 80000000 / 2400;
+
 // PID
 
 int pid_pos = 0;
@@ -222,48 +315,36 @@ char g_pass[64]     = DEFAULT_WIFI_STA_PASS;
 signed int encoder_pos = 0;
 unsigned int dead_zone = 0;
 
+float dfc_speed = 1;
 
-float p_term = 0;
-float i_term = 0;
-float d_term = 0;
-int graph_count = 0;
+mcpwm_cap_data_t telemetry_cap_data = {0, 0, 0, 0};
 
-int log_count = 0;
-int time_count = 0;
-static int time_count_max = 1000;
-int telemetry_counter = 0;   
-static bool timer_paused = false; 
+TaskHandle_t dfc_task_handle;
+void dfc_task(void *pvParameters);
+TaskHandle_t foc_task_handle;
+void foc_task(void *pvParameters);
+TaskHandle_t esc_task_handle;
+void esc_task(void *pvParameters);
+TaskHandle_t telemetry_task_handle;
+void telemetry_task(void *pvParameters);
 
 QueueHandle_t g_command_queue;
-TickType_t xLastWakeTime;
-TickType_t now;
-TickType_t prev;
-
-bool g_flag_send_telemetry = true;
-
-volatile unsigned long g_pause_ms = DEFAULT_PAUSE;
-volatile unsigned long g_calibration_timeout_ms = DEFAULT_CALIBRATION_TIMEOUT;
-
 struct sockaddr_storage g_last_cmd_source_addr; // TODO: mutex protect
-
-gptimer_handle_t g_gptimer;
-
-void append_telemetry_data(cJSON *json)
-{
-    cJSON_AddStringToObject(json, STR_TELEMETRY, "true");
-    //cJSON_AddNumberToObject(json, "graph_count", graph_count);
-    cJSON_AddNumberToObject(json, "encoder_pos", encoder_pos);
-    cJSON_AddNumberToObject(json, "time_count", time_count);
-    // cJSON_AddNumberToObject(json, "u", u);
-    // cJSON_AddNumberToObject(json, "duty_ratio", duty_ratio);
-
-}
+int g_last_sock;
+t_command cmd;
 
 char* build_telemetry_string()
 {
     cJSON *json = cJSON_CreateObject();
 
-    append_telemetry_data(json);
+    cJSON_AddBoolToObject(json, STR_TELEMETRY, flag_send_telemetry);
+    cJSON_AddNumberToObject(json, "time", mcpwm_cap_data.cur_tick / 800000);
+    if (telemetry_cap_data.per != 0) cJSON_AddNumberToObject(json, "speed", 
+        speed_coef * (telemetry_cap_data.cur_pos - telemetry_cap_data.prev_pos) / telemetry_cap_data.per);
+    else cJSON_AddNumberToObject(json, "speed", 0);
+    cJSON_AddNumberToObject(json, "pos", telemetry_cap_data.cur_pos);
+    cJSON_AddNumberToObject(json, "esc_up", esc_up);
+    cJSON_AddNumberToObject(json, "esc_ui", esc_ui);
 
     char* str = cJSON_Print(json);
     cJSON_Delete(json);
@@ -277,17 +358,13 @@ char* build_config_string(bool for_nvs)
     cJSON_AddStringToObject(json, STR_IP_ADDR, g_ip_addr);
     cJSON_AddStringToObject(json, STR_SSID, g_ssid);
     cJSON_AddStringToObject(json, STR_PASS, g_pass);
-    cJSON_AddNumberToObject(json, STR_PAUSE, g_pause_ms);
-    cJSON_AddNumberToObject(json, STR_CALIBRATION_TIMEOUT, g_calibration_timeout_ms);
-    cJSON_AddNumberToObject(json, STR_FLAG_SEND_TELEMETRY, g_flag_send_telemetry);
-    cJSON_AddNumberToObject(json, "goal_pos", goal_pos);
-    cJSON_AddNumberToObject(json, "kp", pid_kp);
-    cJSON_AddNumberToObject(json, "ki", pid_ki);
-    cJSON_AddNumberToObject(json, "kd", pid_kd);
-    cJSON_AddNumberToObject(json, "dead_zone", dead_zone);
-    cJSON_AddNumberToObject(json, "time_count_max", time_count_max);
-    cJSON_AddNumberToObject(json, "i_term_max", i_term_max);
-    // cJSON_AddNumberToObject(json, "duty", duty);
+    cJSON_AddNumberToObject(json, "esc_kp", esc_kp);
+    cJSON_AddNumberToObject(json, "esc_ki", esc_ki);
+    cJSON_AddNumberToObject(json, "esc_ui_max", esc_ui_max);
+    cJSON_AddNumberToObject(json, "esc_goal", esc_goal);
+    cJSON_AddNumberToObject(json, "esc_gamma", esc_gamma);
+    cJSON_AddNumberToObject(json, "esc_koef", esc_koef);
+    cJSON_AddNumberToObject(json, "dfc_speed", dfc_speed);
 
     if (!for_nvs)
     {
@@ -324,20 +401,50 @@ void parse_config_string(const char *str)
         {   
             cJSON *subitem = cJSON_GetArrayItem(parsed_cmd, i);
 
-            ESP_LOGI(TAG, "Item %s", subitem->string);
+            // ESP_LOGI(TAG, "Item %s", subitem->string);
             
             char *param_name = subitem->string;
 
-            if (!strcmp(param_name, STR_IP_ADDR)) strncpy(g_ip_addr, subitem->valuestring, sizeof(g_ip_addr)-1);
-            if (!strcmp(param_name, STR_SSID)) strncpy(g_ssid, subitem->valuestring, sizeof(g_ssid)-1);
-            if (!strcmp(param_name, STR_PASS)) strncpy(g_pass, subitem->valuestring, sizeof(g_pass)-1);
-            if (!strcmp(param_name, STR_PAUSE)) g_pause_ms = subitem->valueint;
-            if (!strcmp(param_name, STR_CALIBRATION_TIMEOUT)) g_calibration_timeout_ms = subitem->valueint;
-            if (!strcmp(param_name, STR_FLAG_SEND_TELEMETRY)) g_flag_send_telemetry = subitem->valueint;
-
-            if (!strcmp(param_name, STR_CMD_READ_FLASH) && subitem->valueint) nvs_read_config();
-            if (!strcmp(param_name, STR_CMD_WRITE_FLASH) && subitem->valueint) nvs_write_config();
+            if (!strcmp(param_name, "cmd1")) 
+            {
+                if (!strcmp(subitem->valuestring, "stop")) num_command = -1;
+                if (!strcmp(subitem->valuestring, "dfc")) num_command = 1;
+                if (!strcmp(subitem->valuestring, "foc")) num_command = 2;
+                if (!strcmp(subitem->valuestring, "esc")) num_command = 3;
+            }
+            else if (!strcmp(param_name, "telemetry")) 
+            {
+                flag_send_telemetry = subitem->valueint;
+            }
+            else num_command = 0;
         }
+        ESP_LOGI("Mine", "num_command = %d", num_command);
+
+        if (num_command == 0)
+        {
+            for (int i=0; i < cJSON_GetArraySize(parsed_cmd); i++)
+            {   
+                cJSON *subitem = cJSON_GetArrayItem(parsed_cmd, i);
+
+                ESP_LOGI(TAG, "Item %s", subitem->string);
+                
+                char *param_name = subitem->string;
+
+                if (!strcmp(param_name, STR_IP_ADDR)) strncpy(g_ip_addr, subitem->valuestring, sizeof(g_ip_addr)-1);
+                if (!strcmp(param_name, STR_SSID)) strncpy(g_ssid, subitem->valuestring, sizeof(g_ssid)-1);
+                if (!strcmp(param_name, STR_PASS)) strncpy(g_pass, subitem->valuestring, sizeof(g_pass)-1);
+                if (!strcmp(param_name, "esc_goal")) esc_goal = subitem->valuedouble;
+                if (!strcmp(param_name, "esc_kp")) esc_kp = subitem->valuedouble;
+                if (!strcmp(param_name, "esc_ki")) esc_ki = subitem->valuedouble;
+                if (!strcmp(param_name, "esc_ui_max")) esc_ui_max = subitem->valuedouble;
+                if (!strcmp(param_name, "esc_gamma")) esc_gamma = subitem->valuedouble;
+                if (!strcmp(param_name, "esc_koef")) esc_koef = subitem->valuedouble;
+                if (!strcmp(param_name, "dfc_speed")) dfc_speed = subitem->valuedouble;
+                if (!strcmp(param_name, STR_CMD_READ_FLASH) && subitem->valueint) nvs_read_config();
+                if (!strcmp(param_name, STR_CMD_WRITE_FLASH) && subitem->valueint) nvs_write_config();
+            }
+        }
+        
     }
 
     cJSON_Delete(parsed_cmd);
@@ -345,7 +452,6 @@ void parse_config_string(const char *str)
 
 void command_processing_task(void *pvParameters)
 {
-    t_command cmd;
     while (1)
     {
         ESP_LOGI(TAG, "Will wait command");
@@ -357,12 +463,13 @@ void command_processing_task(void *pvParameters)
         {
             ESP_LOGI(TAG, "Got command %s", cmd.cmd);            
             g_last_cmd_source_addr = cmd.source_addr;
+            g_last_sock = cmd.sock;
             parse_config_string(cmd.cmd);
             
             char *config_to_send = build_config_string(false);            
             if (config_to_send)
             {
-                ESP_LOGI(TAG, "Will send config %s", config_to_send);
+                // ESP_LOGI(TAG, "Will send config %s", config_to_send);
                 int err = sendto(cmd.sock, config_to_send, strlen(config_to_send), 0, (struct sockaddr *)&cmd.source_addr, sizeof(struct sockaddr));
                 if (err < 0) 
                 {
@@ -371,56 +478,94 @@ void command_processing_task(void *pvParameters)
             }
             free(config_to_send);
 
-            char *telemetry_to_send = build_telemetry_string();            
-            if (telemetry_to_send)
+            if (!current_telemetry && flag_send_telemetry)
             {
-                //ESP_LOGI(TAG, "Will send telemetry %s", telemetry_to_send);
-                int err = sendto(cmd.sock, telemetry_to_send, strlen(telemetry_to_send), 0, (struct sockaddr *)&cmd.source_addr, sizeof(struct sockaddr));
-                if (err < 0) 
+                telemetry_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
+                xTaskCreate(telemetry_task, "Telemetry", 4096, NULL, 1, &telemetry_task_handle);
+                current_telemetry = true;
+            }
+            else if (current_telemetry && !flag_send_telemetry)
+            {
+                if (current_task == 0 || current_task == 1)
                 {
-                    ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+                    ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_A));
+                    ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_B));
+                    ESP_ERROR_CHECK(mcpwm_capture_timer_stop(mcpwm_cap_timer));
+                    flag_mcpwm_cap_activated = false;
+                }
+                vTaskDelete(telemetry_task_handle);
+                current_telemetry = false;
+                vQueueDelete(telemetry_queue);
+                ESP_LOGI("Telemetry", "stopped");
+            }
+
+            if (num_command == 1)
+            {
+                if (current_task == 0)
+                {
+                    xTaskCreate(dfc_task, "Direct_Field_Control", 4096, NULL, 2, &dfc_task_handle);
+                    current_task = 1;
                 }
             }
-            free(telemetry_to_send);
+            else if (num_command == 2)
+            {
+                if (current_task == 0)
+                {
+                    mcpwm_cap_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
+                    xTaskCreate(foc_task, "Field_Oriented_Control", 4096, NULL, 2, &foc_task_handle);
+                    current_task = 2;
+                }
+            }
+            else if (num_command == 3)
+            {
+                if (current_task == 0)
+                {
+                    mcpwm_cap_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
+                    xTaskCreate(esc_task, "Electrical_Speed_Control", 4096, NULL, 2, &esc_task_handle);
+                    current_task = 3;
+                }
+            }
+            else if (num_command == -1)
+            {
+                if (current_task == 1)
+                {
+                    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
+                    ESP_ERROR_CHECK(gptimer_stop(gptimer));
+                    vTaskDelete(dfc_task_handle);
+                    current_task = 0;
+                }
+                else if (current_task == 2)
+                {
+                    if (!current_telemetry)
+                    {
+                        ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_A));
+                        ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_B));
+                        ESP_ERROR_CHECK(mcpwm_capture_timer_stop(mcpwm_cap_timer));
+                        flag_mcpwm_cap_activated = false;
+                    }
+                    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
+                    vTaskDelete(foc_task_handle);
+                    current_task = 0;
+                    vQueueDelete(mcpwm_cap_queue);
+                }
+                else if (current_task == 3)
+                {
+                    if (!current_telemetry)
+                    {
+                        ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_A));
+                        ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_B));
+                        ESP_ERROR_CHECK(mcpwm_capture_timer_stop(mcpwm_cap_timer));
+                        flag_mcpwm_cap_activated = false;
+                    }
+                    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
+                    vTaskDelete(esc_task_handle);
+                    current_task = 0;
+                    vQueueDelete(mcpwm_cap_queue);
+                }
+            }
         }
     }
     vTaskDelete(NULL);
-}
-
-void IRAM_ATTR sense_stop_isr(void *arg)
-{
-    BaseType_t flag_yield = 0;
-
-    xTaskNotifyFromISR((TaskHandle_t)arg, 0, 0, &flag_yield);
-
-    portYIELD_FROM_ISR(flag_yield);
-}
-
-void init_pins()
-{
-    gpio_reset_pin(PIN_GHA);
-    gpio_set_direction(PIN_GHA, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_GHA, 0);
-
-    gpio_reset_pin(PIN_GHB);
-    gpio_set_direction(PIN_GHB, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_GHB, 0);
-
-    gpio_reset_pin(PIN_GHC);
-    gpio_set_direction(PIN_GHC, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_GHC, 0);
-
-    gpio_reset_pin(PIN_A);
-    gpio_set_direction(PIN_A, GPIO_MODE_INPUT);
-    gpio_input_enable(PIN_A);
-    gpio_set_pull_mode(PIN_A, GPIO_PULLUP_ONLY);
-    gpio_pullup_en(PIN_A);
-
-    gpio_reset_pin(PIN_B);
-    gpio_set_direction(PIN_B, GPIO_MODE_INPUT);
-    gpio_input_enable(PIN_B);
-    gpio_set_pull_mode(PIN_B, GPIO_PULLUP_ONLY);
-    gpio_pullup_en(PIN_B);
 }
 
 void nvs_read_config()
@@ -517,14 +662,43 @@ void foc_inverse_clark_transform(foc_ab_coord_t *ab, foc_uvw_coord_t *uvw)
     uvw->w = -uvw->u - uvw->v; 
 }
 
+// Initializations
+
+void pins_init()
+{
+    gpio_reset_pin(PIN_GHA);
+    gpio_set_direction(PIN_GHA, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_GHA, 0);
+
+    gpio_reset_pin(PIN_GHB);
+    gpio_set_direction(PIN_GHB, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_GHB, 0);
+
+    gpio_reset_pin(PIN_GHC);
+    gpio_set_direction(PIN_GHC, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_GHC, 0);
+
+    gpio_reset_pin(PIN_A);
+    gpio_set_direction(PIN_A, GPIO_MODE_INPUT);
+    gpio_input_enable(PIN_A);
+    gpio_set_pull_mode(PIN_A, GPIO_PULLUP_ONLY);
+    gpio_pullup_en(PIN_A);
+
+    gpio_reset_pin(PIN_B);
+    gpio_set_direction(PIN_B, GPIO_MODE_INPUT);
+    gpio_input_enable(PIN_B);
+    gpio_set_pull_mode(PIN_B, GPIO_PULLUP_ONLY);
+    gpio_pullup_en(PIN_B);
+}
+
 void pcnt_init()
 {
     ESP_ERROR_CHECK(pcnt_new_unit(&pcnt_unit_config, &pcnt_unit));
     ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &pcnt_chan_a_config, &pcnt_chan_a));
     ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &pcnt_chan_b_config, &pcnt_chan_b));
     ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(pcnt_unit, &pcnt_gf_config));
-    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(pcnt_unit, -2400));
-    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(pcnt_unit, 2400));
+    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(pcnt_unit, -24000));
+    ESP_ERROR_CHECK(pcnt_unit_add_watch_point(pcnt_unit, 24000));
 
     ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_a, PCNT_CHANNEL_EDGE_ACTION_DECREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
     ESP_ERROR_CHECK(pcnt_channel_set_level_action(pcnt_chan_a, PCNT_CHANNEL_LEVEL_ACTION_KEEP, PCNT_CHANNEL_LEVEL_ACTION_INVERSE));
@@ -536,7 +710,7 @@ void pcnt_init()
     ESP_ERROR_CHECK(pcnt_unit_start(pcnt_unit));
 }
 
-void mcpwm_init()
+void mcpwm_pwm_init()
 {
     ESP_ERROR_CHECK(mcpwm_new_timer(&mcpwm_timer_config, &mcpwm_timer));
 
@@ -558,6 +732,26 @@ void mcpwm_init()
     ESP_ERROR_CHECK(mcpwm_timer_enable(mcpwm_timer));
 }
 
+void mcpwm_capture_init()
+{
+    ESP_ERROR_CHECK(mcpwm_new_capture_timer(&mcpwm_cap_timer_config, &mcpwm_cap_timer));
+    ESP_ERROR_CHECK(mcpwm_new_capture_channel(mcpwm_cap_timer, &mcpwm_cap_channel_A_config, &mcpwm_cap_channel_A));
+    ESP_ERROR_CHECK(mcpwm_new_capture_channel(mcpwm_cap_timer, &mcpwm_cap_channel_B_config, &mcpwm_cap_channel_B));
+
+    ESP_ERROR_CHECK(mcpwm_capture_timer_enable(mcpwm_cap_timer));
+    ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(mcpwm_cap_channel_A, &aaa, NULL));
+    ESP_ERROR_CHECK(mcpwm_capture_channel_register_event_callbacks(mcpwm_cap_channel_B, &aaa, NULL)); 
+}
+
+void gptimer_init()
+{
+    gptimer_semaphore = xSemaphoreCreateBinary();
+    ESP_ERROR_CHECK(gptimer_new_timer(&gptimer_config, &gptimer));
+    ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &gptimer_alarm_config));
+    ESP_ERROR_CHECK(gptimer_register_event_callbacks(gptimer, &gptimer_callback_group, NULL));
+    ESP_ERROR_CHECK(gptimer_enable(gptimer));
+}
+
 void calibration()
 {
     ESP_LOGI("Calibration", "Started");
@@ -575,7 +769,7 @@ void calibration()
     ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[1], foc_duty_arr[1]));
     ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[2], foc_duty_arr[2]));
 
-    vTaskDelay(pdMS_TO_TICKS(3000));
+    vTaskDelay(pdMS_TO_TICKS(1000));
     ESP_ERROR_CHECK(pcnt_unit_get_count(pcnt_unit, &foc_bias));
 
     ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
@@ -587,12 +781,222 @@ void calibration()
     ESP_LOGI("Calibration", "calibrated succesful");
 }
 
+// Command tasks
+
+void dfc_task(void *pvParameters)
+{
+    ESP_LOGI("DFC", "Task started");
+    foc_dq_coord.d = 1;
+    
+    if (current_telemetry && !flag_mcpwm_cap_activated)
+    {
+        ESP_ERROR_CHECK(mcpwm_capture_timer_start(mcpwm_cap_timer));
+        ESP_ERROR_CHECK(mcpwm_capture_channel_enable(mcpwm_cap_channel_A));
+        ESP_ERROR_CHECK(mcpwm_capture_channel_enable(mcpwm_cap_channel_B));
+        flag_mcpwm_cap_activated = true;
+    }
+
+    ESP_ERROR_CHECK(gptimer_start(gptimer));
+    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
+
+    while (true)
+    {
+        if (xSemaphoreTake(gptimer_semaphore, pdMS_TO_TICKS(10)) == pdTRUE)
+        {
+            foc_el_phi_deg += dfc_speed * (360 * foc_el_freq / 1000000 * 15);
+            if(foc_el_phi_deg >= 360)
+            {
+                foc_el_phi_deg -= 360;
+            }
+            else if (foc_el_phi_deg <= -360)
+            {
+                foc_el_phi_deg += 360;
+            }
+            foc_el_phi_rad = foc_el_phi_deg * M_PI / 180;
+
+            foc_inverse_park_transform(foc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
+            foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
+
+            foc_duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
+            foc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
+            foc_duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
+
+            for (int i = 0; i < 3; i++)
+            {
+                ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], foc_duty_arr[i]));
+            }
+        }
+        else
+        {
+            ESP_LOGI("dfc", "Error");
+        }
+    }
+}
+
+void foc_task(void *pvParameters)
+{
+    ESP_LOGI("FOC", "Task started");
+    foc_dq_coord.d = 1;
+    foc_dir = 1;
+
+    calibration();
+    if (!flag_mcpwm_cap_activated)
+    {
+        ESP_ERROR_CHECK(mcpwm_capture_timer_start(mcpwm_cap_timer));
+        ESP_ERROR_CHECK(mcpwm_capture_channel_enable(mcpwm_cap_channel_A));
+        ESP_ERROR_CHECK(mcpwm_capture_channel_enable(mcpwm_cap_channel_B));
+        flag_mcpwm_cap_activated = true;
+    }
+    mcpwm_cap_data_t foc_cap_data = {0, 0, 0, 0};
+
+    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
+
+    while (true)
+    {
+        if (xQueueReceive(mcpwm_cap_queue, &foc_cap_data, pdMS_TO_TICKS(100)) != pdPASS)
+        {
+            pcnt_unit_get_count(pcnt_unit, &(foc_cap_data.cur_pos));
+        }
+
+        foc_el_phi_deg = (float)(foc_cap_data.cur_pos - foc_bias) / 2400 * 360 * 14 + foc_dir * 90;
+        if(foc_el_phi_deg >= 360)
+        {
+            foc_el_phi_deg -= 360;
+        }
+        else if (foc_el_phi_deg <= -360)
+        {
+            foc_el_phi_deg += 360;
+        }
+        foc_el_phi_rad = foc_el_phi_deg * M_PI / 180;
+
+        foc_inverse_park_transform(foc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
+        foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
+
+        foc_duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
+        foc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
+        foc_duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
+
+        for (int i = 0; i < 3; i++)
+        {
+            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], foc_duty_arr[i]));
+        }
+    }
+}
+
+void esc_task(void *pvParameters)
+{
+    ESP_LOGI("ESC", "Task started");
+    calibration();
+    if (!flag_mcpwm_cap_activated)
+    {
+        ESP_ERROR_CHECK(mcpwm_capture_timer_start(mcpwm_cap_timer));
+        ESP_ERROR_CHECK(mcpwm_capture_channel_enable(mcpwm_cap_channel_A));
+        ESP_ERROR_CHECK(mcpwm_capture_channel_enable(mcpwm_cap_channel_B));
+        flag_mcpwm_cap_activated = true;
+    }
+    mcpwm_cap_data_t esc_cap_data = {0, 0, 0, 0};
+
+    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
+
+    while (true)
+    {
+        esc_avg_prev = esc_avg;
+        if (xQueueReceive(mcpwm_cap_queue, &esc_cap_data, pdMS_TO_TICKS(10)) != pdPASS)
+        {
+            // mcpwm_capture_channel_trigger_soft_catch(mcpwm_cap_channel_A);
+            // xQueueReceive(mcpwm_cap_queue, &esc_cap_data, 0);
+            // ESP_LOGI("MINE", "CATCHED");
+            esc_speed = 0;
+        }
+        else if (esc_cap_data.per != 0)
+        {
+            esc_speed = speed_coef * (esc_cap_data.cur_pos - esc_cap_data.prev_pos) / esc_cap_data.per;
+        }
+        esc_avg = esc_avg_prev * (1.0 - esc_gamma) + esc_speed * esc_gamma;
+
+        esc_r = esc_goal - esc_avg;
+        esc_up = esc_kp * esc_r;
+
+        esc_ui += esc_ki * esc_r;
+        esc_ui = (esc_ui > esc_ui_max) ? esc_ui_max : (esc_ui < -esc_ui_max) ? -esc_ui_max : esc_ui;
+        esc_u = esc_up + esc_ui;
+
+        esc_dir = (esc_u > 0) ? 1 : -1;
+        esc_u = (abs(esc_u) > esc_u_max) ? esc_u_max : abs(esc_u);
+
+        if (esc_cap_data.znak != esc_dir)
+        {
+            foc_dq_coord.d = esc_koef * esc_u / esc_u_max;
+        }
+        else
+        {
+            foc_dq_coord.d = esc_u / esc_u_max;
+        }
+
+        foc_el_phi_deg = (float)(esc_cap_data.cur_pos - foc_bias) / 2400 * 360 * 14 + esc_dir * 90;
+        if(foc_el_phi_deg >= 360)
+        {
+            foc_el_phi_deg -= 360;
+        }
+        else if (foc_el_phi_deg <= -360)
+        {
+            foc_el_phi_deg += 360;
+        }
+        foc_el_phi_rad = foc_el_phi_deg * M_PI / 180;
+
+        foc_inverse_park_transform(foc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
+        foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
+
+        foc_duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
+        foc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
+        foc_duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
+
+        for (int i = 0; i < 3; i++)
+        {
+            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], foc_duty_arr[i]));
+        }
+    }
+}
+
+void telemetry_task(void *pvParameters)
+{
+    ESP_LOGI("Telemetry", "started");
+    if (!flag_mcpwm_cap_activated)
+    {
+        ESP_ERROR_CHECK(mcpwm_capture_timer_start(mcpwm_cap_timer));
+        ESP_ERROR_CHECK(mcpwm_capture_channel_enable(mcpwm_cap_channel_A));
+        ESP_ERROR_CHECK(mcpwm_capture_channel_enable(mcpwm_cap_channel_B));
+        flag_mcpwm_cap_activated = true;
+    }
+
+    while (1)
+    {
+        if (xQueueReceive(telemetry_queue, &telemetry_cap_data, 0) != pdPASS)
+        {
+            mcpwm_capture_channel_trigger_soft_catch(mcpwm_cap_channel_A);
+        }
+        char *telemetry_to_send = build_telemetry_string();            
+        if (telemetry_to_send)
+        {
+            int err = sendto(cmd.sock, telemetry_to_send, strlen(telemetry_to_send), 0, (struct sockaddr *)&cmd.source_addr, sizeof(struct sockaddr));
+            if (err < 0) 
+            {
+                ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+            }
+        }
+        free(telemetry_to_send);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
 
 void app_main(void)
 {
-    prev = xTaskGetTickCount();
-    init_pins();
-    
+    pins_init();
+    pcnt_init();
+    mcpwm_pwm_init();
+    mcpwm_capture_init();
+    gptimer_init();
+
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) 
     {
@@ -624,82 +1028,11 @@ void app_main(void)
         xTaskCreate(udp_server_task, "udp_server", 4096, (void*)AF_INET, 1, NULL);
     }
 
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    pcnt_init();
+    vTaskDelay(pdMS_TO_TICKS(1000));
 
-    mcpwm_init();
-
-    calibration();
-
-    // int delay_ms = 15;
-    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
-
+    t_command cmd;
     while (1)
     {
-        ESP_ERROR_CHECK(pcnt_unit_get_count(pcnt_unit, &pcnt_pos));
-
-        // pid_r = pid_goal - pcnt_pos;
-        // if (pcnt_pos % 2400 == 0)
-        // {
-            // ESP_LOGI("Encoder", "pos = %d", pcnt_pos);
-        // }
-        // ESP_LOGI("Encoder", "pos = %d", pcnt_pos);
-
-        // pid_up = pid_kp * pid_r;
-        // pid_ui += pid_ki * pid_r;
-        // pid_ui = (pid_ui > 1000) ? 1000 : (pid_ui < -1000) ? -1000 : pid_ui;
-        // pid_ud = pid_kd * (pid_r - pid_r_prev);
-
-        // pid_u = pid_up + pid_ui + pid_ud;
-        // pid_r_prev = pid_r;
-
-        // pid_dir = (pid_u > 0) ? 1 : -1;
-        // pid_dir = 1;
-        // if (log_count >= 5000)
-        // {
-        //     // ESP_LOGI("While", "r = %d, u = %.2f, dir = %d", pid_r, pid_u, pid_dir);
-        //     // ESP_LOGI("Encoder", "pos = %d", pcnt_pos);
-        //     int32_t gg = (int32_t)(pcnt_pos * 1000 / ((int32_t)now-(int32_t)prev));
-        //     ESP_LOGI("Encoder", "speed = %d", gg);
-        // }
-        prev = now;
-        // pid_u = (abs(pid_u) > pid_u_max) ? pid_u_max : abs(pid_u);
-
-        foc_el_phi_deg = (float)(pcnt_pos - foc_bias) / 2400 * 360 * 14 + 90;
-        // foc_el_phi_deg += (360 * foc_el_freq / 1000 * 15);
-        // ESP_LOGI("FOC", "foc_el_phi_deg = %.2f", foc_el_phi_deg);
-        if(foc_el_phi_deg >= 360)
-        {
-            foc_el_phi_deg -= 360;
-        }
-        else if (foc_el_phi_deg <= -360)
-        {
-            foc_el_phi_deg += 360;
-        }
-        foc_el_phi_rad = foc_el_phi_deg * M_PI / 180;
-        // foc_dq_coord.d = pid_u / pid_u_max;
-        // foc_dq_coord.d = 0.1;
-        // ESP_LOGI("FOC", "d = %.2f, q = %.2f", foc_dq_coord.d, foc_dq_coord.q);
-        foc_inverse_park_transform(foc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
-        // ESP_LOGI("FOC", "a = %.2f, b = %.2f", foc_ab_coord.alpha, foc_ab_coord.beta);
-        foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
-        // ESP_LOGI("FOC", "u = %.2f, v = %.2f, w = %.2f", foc_uvw_coord.u, foc_uvw_coord.v, foc_uvw_coord.w);
-
-        foc_duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
-        foc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
-        foc_duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
-
-
-        for (int i = 0; i < 3; i++)
-        {
-            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], foc_duty_arr[i]));
-        }
-        if (log_count >= 5000)
-        {
-            // ESP_LOGI("ABC", "A = %d, B = %d, C = %d", foc_duty_arr[0], foc_duty_arr[1], foc_duty_arr[2]);
-        }
-        log_count++;
-        // vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(delay_ms));
-        // vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
  }
