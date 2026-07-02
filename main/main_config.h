@@ -49,17 +49,20 @@
 #define STR_CMD_READ_FLASH      "restore_from_flash"
 #define STR_CMD_WRITE_FLASH     "save_to_flash"
 
-#define PIN_GHA                 (21)
+#define PIN_GHA                 (13)
 #define PIN_GLA                 ()
 
-#define PIN_GHB                 (19)
+#define PIN_GHB                 (15)
 #define PIN_GLB                 ()
 
-#define PIN_GHC                 (18)
+#define PIN_GHC                 (17)
 #define PIN_GLC                 ()
 
-#define PIN_A                   (25)
-#define PIN_B                   (26)
+#define PIN_A                   (14)
+#define PIN_B                   (16)
+
+#define PIN_3V_1                (12)
+#define PIN_3V_2                (39)
 
 #define DUTY_RESOLUTION_BIT     (8)
 #define DEFAULT_PAUSE           (100)

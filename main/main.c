@@ -46,6 +46,7 @@ QueueHandle_t telemetry_queue;
 
 int num_command = 0;
 int current_task = 0;
+volatile uint32_t count = 0;
 
 // GPTimer
 
@@ -54,13 +55,20 @@ SemaphoreHandle_t gptimer_semaphore;
 gptimer_config_t gptimer_config = {
     .clk_src = GPTIMER_CLK_SRC_DEFAULT,
     .direction = GPTIMER_COUNT_UP,
-    .resolution_hz = 100000
+    .resolution_hz = 100000,
+    .intr_priority = 0
 };
 gptimer_handle_t gptimer;
 
-gptimer_alarm_config_t gptimer_alarm_config = {
+gptimer_alarm_config_t gptimer_dfc_alarm_config = {
     .reload_count = 0,
     .alarm_count = 10,
+    .flags.auto_reload_on_alarm = true
+};
+
+gptimer_alarm_config_t gptimer_esc_alarm_config = {
+    .reload_count = 0,
+    .alarm_count = 15,
     .flags.auto_reload_on_alarm = true
 };
 
@@ -68,6 +76,7 @@ bool gptimer_callback(gptimer_handle_t timer, const gptimer_alarm_event_data_t *
 {
     BaseType_t xHigherPriorityTaskWoke = pdFALSE;
     xSemaphoreGiveFromISR(gptimer_semaphore, &xHigherPriorityTaskWoke);
+    // count++;
     portYIELD_FROM_ISR(xHigherPriorityTaskWoke);
 
     return false;
@@ -77,34 +86,35 @@ gptimer_event_callbacks_t gptimer_callback_group = {
     .on_alarm = gptimer_callback
 };
 
-// FOC
+// DFC
 
-int foc_duty_arr[3] = {0, 0, 0};
-float foc_el_phi_deg = 0;
-float foc_el_phi_rad = 0;
-float foc_el_freq = 4;
-int foc_bias = 0;
-int foc_dir = 1;
+int dfc_duty_arr[3] = {0, 0, 0};
+float dfc_el_phi_deg = 0;
+float dfc_el_phi_rad = 0;
+float dfc_el_freq = 4;
+int dfc_bias = 0;
+int dfc_dir = 1;
+float dfc_speed = 1;
 
-typedef struct foc_uvw_coord {
+typedef struct dfc_uvw_coord {
     float u;
     float v;
     float w;
-} foc_uvw_coord_t;
+} dfc_uvw_coord_t;
 
-typedef struct foc_ab_coord {
+typedef struct dfc_ab_coord {
     float alpha;
     float beta;
-} foc_ab_coord_t;
+} dfc_ab_coord_t;
 
-typedef struct foc_dq_coord {
+typedef struct dfc_dq_coord {
     float d;
     float q;
-} foc_dq_coord_t;
+} dfc_dq_coord_t;
 
-foc_uvw_coord_t foc_uvw_coord = {0, 0, 0};
-foc_ab_coord_t foc_ab_coord = {0, 0};
-foc_dq_coord_t foc_dq_coord = {1, 0};
+dfc_uvw_coord_t dfc_uvw_coord = {0, 0, 0};
+dfc_ab_coord_t dfc_ab_coord = {0, 0};
+dfc_dq_coord_t dfc_dq_coord = {1, 0};
 
 // Pulse counter
 
@@ -137,7 +147,7 @@ pcnt_glitch_filter_config_t pcnt_gf_config = {
 
 // MCPWM (PWM)
 
-const uint32_t mcpwm_res = 20000000;
+const uint32_t mcpwm_res = 40000000;
 const int mcpwm_per = 1000;
 
 int mcpwm_gen_pins[3] = {PIN_GHA, PIN_GHB, PIN_GHC};
@@ -240,12 +250,12 @@ bool aboba(mcpwm_cap_channel_handle_t chan, const mcpwm_capture_event_data_t *ed
     mcpwm_cap_data.cur_tick = edata->cap_value;
 
     mcpwm_cap_data.per = (mcpwm_cap_data.cur_tick - mcpwm_cap_data.prev_tick > 0) 
-    ? mcpwm_cap_data.cur_tick - mcpwm_cap_data.prev_tick 
+    ? mcpwm_cap_data.cur_tick - mcpwm_cap_data.prev_tick
     : UINT32_MAX - mcpwm_cap_data.prev_tick + mcpwm_cap_data.cur_tick;
 
     mcpwm_cap_data.znak = (mcpwm_cap_data.cur_pos > mcpwm_cap_data.prev_pos) ? 1 : -1;
 
-    if ((current_task == 2) || (current_task == 3)) xQueueOverwriteFromISR(mcpwm_cap_queue, &mcpwm_cap_data, &xHigherPriorityTaskWoken);
+    if ((current_task == 2) || (current_task == 3) || (current_task == 4)) xQueueOverwriteFromISR(mcpwm_cap_queue, &mcpwm_cap_data, &xHigherPriorityTaskWoken);
     if (current_telemetry) xQueueOverwriteFromISR(telemetry_queue, &mcpwm_cap_data, &xHigherPriorityTaskWoken);
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 
@@ -258,48 +268,52 @@ mcpwm_capture_event_callbacks_t aaa = {
 
 // ESC
 
-double esc_speed = 0;
-double esc_goal = 1;
-double esc_r = 0;
-double esc_kp = 0.1;
-double esc_ki = 0.1;
-double esc_gamma = 0.8;
+float esc_speed = 0;
+float esc_goal = 1;
+float esc_r = 0;
+float esc_kp = 0.1;
+float esc_ki = 0.1;
+float esc_gamma = 0.8;
 float esc_koef = 1;
 
-double esc_up = 0;
-double esc_ui = 0;
-double esc_ui_max = 10;
-double esc_u = 0;
-double esc_u_max = 10;
+float esc_up = 0;
+float esc_ui = 0;
+float esc_ui_max = 10;
+float esc_u = 0;
+float esc_u_max = 10;
 int esc_dir = 1;
 
-double esc_avg = 0;
-double esc_avg_prev = 0;
+float esc_ki_max = 5;
+float esc_ki_coef = -9.8;
 
-double speed_coef = 80000000 / 2400;
+float esc_avg = 0;
+float esc_avg_prev = 0;
 
-// PID
+float speed_coef = 80000000 / 2400;
+
+// Servo
 
 int pid_pos = 0;
-int pid_goal = 2400;
-int pid_r = 0;
-int pid_r_prev = 0;
+int servo_goal = 2400;
+int servo_r = 0;
+int servo_r_prev = 0;
 
-float pid_kp = 10;
-float pid_ki = 0;
-float pid_kd = 0;
+float servo_kp = 1;
+float servo_ki = 0;
+float servo_kd = 0;
 
-float pid_up = 0;
-float pid_ui = 0;
-float pid_ud = 0;
-float pid_u = 0;
+float servo_up = 0;
+float servo_ui = 0;
+float servo_ud = 0;
+float servo_u = 0;
 
-float pid_u_max = 7200;
-int pid_dir = 1;
+float servo_u_max = 8000;
+float servo_ui_max = 100;
+int servo_dir = 1;
 
-static float u_integral_max = 100; 
-static float i_term_max = 100; 
-signed int goal_pos = 0;
+float servo_speed_coef = 0.00025;
+
+//
 
 void nvs_read_config();
 void nvs_write_config();
@@ -312,11 +326,6 @@ char g_ssid[64]     = DEFAULT_WIFI_STA_SSID;
 char g_pass[64]     = DEFAULT_WIFI_STA_PASS;
 
 
-signed int encoder_pos = 0;
-unsigned int dead_zone = 0;
-
-float dfc_speed = 1;
-
 mcpwm_cap_data_t telemetry_cap_data = {0, 0, 0, 0};
 
 TaskHandle_t dfc_task_handle;
@@ -325,8 +334,12 @@ TaskHandle_t foc_task_handle;
 void foc_task(void *pvParameters);
 TaskHandle_t esc_task_handle;
 void esc_task(void *pvParameters);
+TaskHandle_t servo_task_handle;
+void servo_task(void *pvParameters);
 TaskHandle_t telemetry_task_handle;
 void telemetry_task(void *pvParameters);
+TaskHandle_t timer_task_handle;
+void timer_task(void *pvParameters);
 
 QueueHandle_t g_command_queue;
 struct sockaddr_storage g_last_cmd_source_addr; // TODO: mutex protect
@@ -343,8 +356,9 @@ char* build_telemetry_string()
         speed_coef * (telemetry_cap_data.cur_pos - telemetry_cap_data.prev_pos) / telemetry_cap_data.per);
     else cJSON_AddNumberToObject(json, "speed", 0);
     cJSON_AddNumberToObject(json, "pos", telemetry_cap_data.cur_pos);
-    cJSON_AddNumberToObject(json, "esc_up", esc_up);
+    cJSON_AddNumberToObject(json, "servo_ui", servo_ui);
     cJSON_AddNumberToObject(json, "esc_ui", esc_ui);
+    cJSON_AddNumberToObject(json, "esc_goal", esc_goal);
 
     char* str = cJSON_Print(json);
     cJSON_Delete(json);
@@ -360,8 +374,15 @@ char* build_config_string(bool for_nvs)
     cJSON_AddStringToObject(json, STR_PASS, g_pass);
     cJSON_AddNumberToObject(json, "esc_kp", esc_kp);
     cJSON_AddNumberToObject(json, "esc_ki", esc_ki);
+    cJSON_AddNumberToObject(json, "esc_ki_max", esc_ki_max);
+    cJSON_AddNumberToObject(json, "esc_ki_coef", esc_ki_coef);
     cJSON_AddNumberToObject(json, "esc_ui_max", esc_ui_max);
     cJSON_AddNumberToObject(json, "esc_goal", esc_goal);
+    cJSON_AddNumberToObject(json, "servo_kp", servo_kp);
+    cJSON_AddNumberToObject(json, "servo_ki", servo_ki);
+    cJSON_AddNumberToObject(json, "servo_ui_max", servo_ui_max);
+    cJSON_AddNumberToObject(json, "servo_goal", servo_goal);
+    cJSON_AddNumberToObject(json, "servo_speed_coef", servo_speed_coef);
     cJSON_AddNumberToObject(json, "esc_gamma", esc_gamma);
     cJSON_AddNumberToObject(json, "esc_koef", esc_koef);
     cJSON_AddNumberToObject(json, "dfc_speed", dfc_speed);
@@ -411,6 +432,7 @@ void parse_config_string(const char *str)
                 if (!strcmp(subitem->valuestring, "dfc")) num_command = 1;
                 if (!strcmp(subitem->valuestring, "foc")) num_command = 2;
                 if (!strcmp(subitem->valuestring, "esc")) num_command = 3;
+                if (!strcmp(subitem->valuestring, "servo")) num_command = 4;
             }
             else if (!strcmp(param_name, "telemetry")) 
             {
@@ -436,7 +458,14 @@ void parse_config_string(const char *str)
                 if (!strcmp(param_name, "esc_goal")) esc_goal = subitem->valuedouble;
                 if (!strcmp(param_name, "esc_kp")) esc_kp = subitem->valuedouble;
                 if (!strcmp(param_name, "esc_ki")) esc_ki = subitem->valuedouble;
+                if (!strcmp(param_name, "esc_ki_max")) esc_ki_max = subitem->valuedouble;
+                if (!strcmp(param_name, "esc_ki_coef")) esc_ki_coef = subitem->valuedouble;
                 if (!strcmp(param_name, "esc_ui_max")) esc_ui_max = subitem->valuedouble;
+                if (!strcmp(param_name, "servo_goal")) servo_goal = subitem->valuedouble;
+                if (!strcmp(param_name, "servo_kp")) servo_kp = subitem->valuedouble;
+                if (!strcmp(param_name, "servo_ki")) servo_ki = subitem->valuedouble;
+                if (!strcmp(param_name, "servo_ui_max")) servo_ui_max = subitem->valuedouble;
+                if (!strcmp(param_name, "servo_speed_coef")) servo_speed_coef = subitem->valuedouble;
                 if (!strcmp(param_name, "esc_gamma")) esc_gamma = subitem->valuedouble;
                 if (!strcmp(param_name, "esc_koef")) esc_koef = subitem->valuedouble;
                 if (!strcmp(param_name, "dfc_speed")) dfc_speed = subitem->valuedouble;
@@ -499,33 +528,35 @@ void command_processing_task(void *pvParameters)
                 ESP_LOGI("Telemetry", "stopped");
             }
 
-            if (num_command == 1)
+            if (current_task == 0)
             {
-                if (current_task == 0)
+                if (num_command == 1)
                 {
                     xTaskCreate(dfc_task, "Direct_Field_Control", 4096, NULL, 2, &dfc_task_handle);
                     current_task = 1;
                 }
-            }
-            else if (num_command == 2)
-            {
-                if (current_task == 0)
+                else if (num_command == 2)
                 {
                     mcpwm_cap_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
                     xTaskCreate(foc_task, "Field_Oriented_Control", 4096, NULL, 2, &foc_task_handle);
                     current_task = 2;
                 }
-            }
-            else if (num_command == 3)
-            {
-                if (current_task == 0)
+                else if (num_command == 3)
                 {
                     mcpwm_cap_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
                     xTaskCreate(esc_task, "Electrical_Speed_Control", 4096, NULL, 2, &esc_task_handle);
+                    // xTaskCreate(timer_task, "Timer", 4096, NULL, 1, &timer_task_handle);
                     current_task = 3;
                 }
+                else if (num_command == 4)
+                {
+                    mcpwm_cap_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
+                    xTaskCreate(servo_task, "Servo_Control", 4096, NULL, 2, &servo_task_handle);
+                    current_task = 4;
+                }
             }
-            else if (num_command == -1)
+
+            if (num_command == -1)
             {
                 if (current_task == 1)
                 {
@@ -558,7 +589,26 @@ void command_processing_task(void *pvParameters)
                         flag_mcpwm_cap_activated = false;
                     }
                     ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
+                    ESP_ERROR_CHECK(gptimer_stop(gptimer));
                     vTaskDelete(esc_task_handle);
+
+                    // vTaskDelete(timer_task_handle);
+                    current_task = 0;
+                    vQueueDelete(mcpwm_cap_queue);
+                }
+                else if (current_task == 4)
+                {
+                    if (!current_telemetry)
+                    {
+                        ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_A));
+                        ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_B));
+                        ESP_ERROR_CHECK(mcpwm_capture_timer_stop(mcpwm_cap_timer));
+                        flag_mcpwm_cap_activated = false;
+                    }
+                    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
+                    ESP_ERROR_CHECK(gptimer_stop(gptimer));
+
+                    vTaskDelete(servo_task_handle);
                     current_task = 0;
                     vQueueDelete(mcpwm_cap_queue);
                 }
@@ -649,13 +699,13 @@ void nvs_write_config()
     }
 }
 
-void foc_inverse_park_transform(float phi, foc_dq_coord_t *dq, foc_ab_coord_t *ab)
+void foc_inverse_park_transform(float phi, dfc_dq_coord_t *dq, dfc_ab_coord_t *ab)
 {
     ab->alpha = dq->d * cos(phi) - dq->q * sin(phi);
     ab->beta  = dq->q * cos(phi) + dq->d * sin(phi);
 }
 
-void foc_inverse_clark_transform(foc_ab_coord_t *ab, foc_uvw_coord_t *uvw)
+void foc_inverse_clark_transform(dfc_ab_coord_t *ab, dfc_uvw_coord_t *uvw)
 {
     uvw->u = ab->alpha;
     uvw->v = (ab->beta * sqrt(3) - ab->alpha) / 2;
@@ -689,6 +739,14 @@ void pins_init()
     gpio_input_enable(PIN_B);
     gpio_set_pull_mode(PIN_B, GPIO_PULLUP_ONLY);
     gpio_pullup_en(PIN_B);
+
+    gpio_reset_pin(PIN_3V_1);
+    gpio_set_direction(PIN_3V_1, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_3V_1, 1);
+
+    gpio_reset_pin(PIN_3V_2);
+    gpio_set_direction(PIN_3V_2, GPIO_MODE_OUTPUT);
+    gpio_set_level(PIN_3V_2, 1);
 }
 
 void pcnt_init()
@@ -747,7 +805,7 @@ void gptimer_init()
 {
     gptimer_semaphore = xSemaphoreCreateBinary();
     ESP_ERROR_CHECK(gptimer_new_timer(&gptimer_config, &gptimer));
-    ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &gptimer_alarm_config));
+    ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &gptimer_esc_alarm_config));
     ESP_ERROR_CHECK(gptimer_register_event_callbacks(gptimer, &gptimer_callback_group, NULL));
     ESP_ERROR_CHECK(gptimer_enable(gptimer));
 }
@@ -757,27 +815,27 @@ void calibration()
     ESP_LOGI("Calibration", "Started");
     ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
 
-    foc_el_phi_rad = 0;
-    foc_inverse_park_transform(foc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
-    foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
+    dfc_el_phi_rad = 0;
+    foc_inverse_park_transform(dfc_el_phi_rad, &dfc_dq_coord, &dfc_ab_coord);
+    foc_inverse_clark_transform(&dfc_ab_coord, &dfc_uvw_coord);
 
-    foc_duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
-    foc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
-    foc_duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
+    dfc_duty_arr[0] = (int)(mcpwm_per * (dfc_uvw_coord.u / 4 + 1.0 / 4));
+    dfc_duty_arr[1] = (int)(mcpwm_per * (dfc_uvw_coord.v / 4 + 1.0 / 4));
+    dfc_duty_arr[2] = (int)(mcpwm_per * (dfc_uvw_coord.w / 4 + 1.0 / 4));
 
-    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[0], foc_duty_arr[0]));
-    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[1], foc_duty_arr[1]));
-    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[2], foc_duty_arr[2]));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[0], dfc_duty_arr[0]));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[1], dfc_duty_arr[1]));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[2], dfc_duty_arr[2]));
 
     vTaskDelay(pdMS_TO_TICKS(1000));
-    ESP_ERROR_CHECK(pcnt_unit_get_count(pcnt_unit, &foc_bias));
+    ESP_ERROR_CHECK(pcnt_unit_get_count(pcnt_unit, &dfc_bias));
 
     ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
 
     ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[0], 0));
     ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[1], 0));
     ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[2], 0));
-    ESP_LOGI("Calibration", "bias = %d", foc_bias);
+    ESP_LOGI("Calibration", "bias = %d", dfc_bias);
     ESP_LOGI("Calibration", "calibrated succesful");
 }
 
@@ -786,7 +844,7 @@ void calibration()
 void dfc_task(void *pvParameters)
 {
     ESP_LOGI("DFC", "Task started");
-    foc_dq_coord.d = 1;
+    dfc_dq_coord.d = 1;
     
     if (current_telemetry && !flag_mcpwm_cap_activated)
     {
@@ -803,27 +861,27 @@ void dfc_task(void *pvParameters)
     {
         if (xSemaphoreTake(gptimer_semaphore, pdMS_TO_TICKS(10)) == pdTRUE)
         {
-            foc_el_phi_deg += dfc_speed * (360 * foc_el_freq / 1000000 * 15);
-            if(foc_el_phi_deg >= 360)
+            dfc_el_phi_deg += dfc_speed * (360 * dfc_el_freq / 1000000 * 15);
+            if(dfc_el_phi_deg >= 360)
             {
-                foc_el_phi_deg -= 360;
+                dfc_el_phi_deg -= 360;
             }
-            else if (foc_el_phi_deg <= -360)
+            else if (dfc_el_phi_deg <= -360)
             {
-                foc_el_phi_deg += 360;
+                dfc_el_phi_deg += 360;
             }
-            foc_el_phi_rad = foc_el_phi_deg * M_PI / 180;
+            dfc_el_phi_rad = dfc_el_phi_deg * M_PI / 180;
 
-            foc_inverse_park_transform(foc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
-            foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
+            foc_inverse_park_transform(dfc_el_phi_rad, &dfc_dq_coord, &dfc_ab_coord);
+            foc_inverse_clark_transform(&dfc_ab_coord, &dfc_uvw_coord);
 
-            foc_duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
-            foc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
-            foc_duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
+            dfc_duty_arr[0] = (int)(mcpwm_per * (dfc_uvw_coord.u / 4 + 1.0 / 4));
+            dfc_duty_arr[1] = (int)(mcpwm_per * (dfc_uvw_coord.v / 4 + 1.0 / 4));
+            dfc_duty_arr[2] = (int)(mcpwm_per * (dfc_uvw_coord.w / 4 + 1.0 / 4));
 
             for (int i = 0; i < 3; i++)
             {
-                ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], foc_duty_arr[i]));
+                ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], dfc_duty_arr[i]));
             }
         }
         else
@@ -836,8 +894,8 @@ void dfc_task(void *pvParameters)
 void foc_task(void *pvParameters)
 {
     ESP_LOGI("FOC", "Task started");
-    foc_dq_coord.d = 1;
-    foc_dir = 1;
+    dfc_dq_coord.d = 1;
+    dfc_dir = 1;
 
     calibration();
     if (!flag_mcpwm_cap_activated)
@@ -858,27 +916,27 @@ void foc_task(void *pvParameters)
             pcnt_unit_get_count(pcnt_unit, &(foc_cap_data.cur_pos));
         }
 
-        foc_el_phi_deg = (float)(foc_cap_data.cur_pos - foc_bias) / 2400 * 360 * 14 + foc_dir * 90;
-        if(foc_el_phi_deg >= 360)
+        dfc_el_phi_deg = (float)(foc_cap_data.cur_pos - dfc_bias) / 2400 * 360 * 14 + dfc_dir * 90;
+        if(dfc_el_phi_deg >= 360)
         {
-            foc_el_phi_deg -= 360;
+            dfc_el_phi_deg -= 360;
         }
-        else if (foc_el_phi_deg <= -360)
+        else if (dfc_el_phi_deg <= -360)
         {
-            foc_el_phi_deg += 360;
+            dfc_el_phi_deg += 360;
         }
-        foc_el_phi_rad = foc_el_phi_deg * M_PI / 180;
+        dfc_el_phi_rad = dfc_el_phi_deg * M_PI / 180;
 
-        foc_inverse_park_transform(foc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
-        foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
+        foc_inverse_park_transform(dfc_el_phi_rad, &dfc_dq_coord, &dfc_ab_coord);
+        foc_inverse_clark_transform(&dfc_ab_coord, &dfc_uvw_coord);
 
-        foc_duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
-        foc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
-        foc_duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
+        dfc_duty_arr[0] = (int)(mcpwm_per * (dfc_uvw_coord.u / 4 + 1.0 / 4));
+        dfc_duty_arr[1] = (int)(mcpwm_per * (dfc_uvw_coord.v / 4 + 1.0 / 4));
+        dfc_duty_arr[2] = (int)(mcpwm_per * (dfc_uvw_coord.w / 4 + 1.0 / 4));
 
         for (int i = 0; i < 3; i++)
         {
-            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], foc_duty_arr[i]));
+            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], dfc_duty_arr[i]));
         }
     }
 }
@@ -886,6 +944,10 @@ void foc_task(void *pvParameters)
 void esc_task(void *pvParameters)
 {
     ESP_LOGI("ESC", "Task started");
+    TickType_t xLastTake = 0;
+
+    // ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &gptimer_esc_alarm_config));
+    
     calibration();
     if (!flag_mcpwm_cap_activated)
     {
@@ -896,64 +958,184 @@ void esc_task(void *pvParameters)
     }
     mcpwm_cap_data_t esc_cap_data = {0, 0, 0, 0};
 
+    ESP_ERROR_CHECK(gptimer_start(gptimer));
     ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
 
     while (true)
     {
-        esc_avg_prev = esc_avg;
-        if (xQueueReceive(mcpwm_cap_queue, &esc_cap_data, pdMS_TO_TICKS(10)) != pdPASS)
+        if (xSemaphoreTake(gptimer_semaphore, pdMS_TO_TICKS(2)) == pdTRUE)
         {
-            // mcpwm_capture_channel_trigger_soft_catch(mcpwm_cap_channel_A);
-            // xQueueReceive(mcpwm_cap_queue, &esc_cap_data, 0);
-            // ESP_LOGI("MINE", "CATCHED");
-            esc_speed = 0;
-        }
-        else if (esc_cap_data.per != 0)
-        {
-            esc_speed = speed_coef * (esc_cap_data.cur_pos - esc_cap_data.prev_pos) / esc_cap_data.per;
-        }
-        esc_avg = esc_avg_prev * (1.0 - esc_gamma) + esc_speed * esc_gamma;
+            if (pdTICKS_TO_MS(xTaskGetTickCount() - xLastTake) < 1)
+            {
+                if (xQueueReceive(mcpwm_cap_queue, &esc_cap_data, 0) == pdPASS)
+                {
+                    if (esc_cap_data.per != 0)
+                    {
+                        esc_avg_prev = esc_avg;
+                        esc_speed = speed_coef * (esc_cap_data.cur_pos - esc_cap_data.prev_pos) / esc_cap_data.per;
+                        esc_avg = esc_avg_prev * (1.0 - esc_gamma) + esc_speed * esc_gamma;
+                    }
+                    xLastTake = xTaskGetTickCount();
+                }
+            }
+            else
+            {
+                esc_avg_prev = esc_avg;
+                esc_speed = 0;
+                esc_avg = esc_avg_prev * (1.0 - esc_gamma) + esc_speed * esc_gamma;
+                xLastTake = xTaskGetTickCount();
+            }
+            esc_r = esc_goal - esc_avg;
+            esc_up = esc_kp * esc_r;
 
-        esc_r = esc_goal - esc_avg;
-        esc_up = esc_kp * esc_r;
+            esc_ui += esc_ki * esc_r;
+            esc_ui = (esc_ui > esc_ui_max) ? esc_ui_max : (esc_ui < -esc_ui_max) ? -esc_ui_max : esc_ui;
+            esc_u = esc_up + esc_ui;
 
-        esc_ui += esc_ki * esc_r;
-        esc_ui = (esc_ui > esc_ui_max) ? esc_ui_max : (esc_ui < -esc_ui_max) ? -esc_ui_max : esc_ui;
-        esc_u = esc_up + esc_ui;
+            esc_dir = (esc_u > 0) ? 1 : -1;
+            esc_u = (abs(esc_u) > esc_u_max) ? esc_u_max : abs(esc_u);
 
-        esc_dir = (esc_u > 0) ? 1 : -1;
-        esc_u = (abs(esc_u) > esc_u_max) ? esc_u_max : abs(esc_u);
+            if (esc_cap_data.znak != esc_dir)
+            {
+                dfc_dq_coord.d = esc_koef * esc_u / esc_u_max;
+            }
+            else
+            {
+                dfc_dq_coord.d = esc_u / esc_u_max;
+            }
 
-        if (esc_cap_data.znak != esc_dir)
-        {
-            foc_dq_coord.d = esc_koef * esc_u / esc_u_max;
+            dfc_el_phi_deg = (float)(esc_cap_data.cur_pos - dfc_bias) / 2400 * 360 * 14 + esc_dir * 90;
+            if(dfc_el_phi_deg >= 360)
+            {
+                dfc_el_phi_deg -= 360;
+            }
+            else if (dfc_el_phi_deg <= -360)
+            {
+                dfc_el_phi_deg += 360;
+            }
+            dfc_el_phi_rad = dfc_el_phi_deg * M_PI / 180;
+
+            foc_inverse_park_transform(dfc_el_phi_rad, &dfc_dq_coord, &dfc_ab_coord);
+            foc_inverse_clark_transform(&dfc_ab_coord, &dfc_uvw_coord);
+
+            dfc_duty_arr[0] = (int)(mcpwm_per * (dfc_uvw_coord.u / 4 + 1.0 / 4));
+            dfc_duty_arr[1] = (int)(mcpwm_per * (dfc_uvw_coord.v / 4 + 1.0 / 4));
+            dfc_duty_arr[2] = (int)(mcpwm_per * (dfc_uvw_coord.w / 4 + 1.0 / 4));
+
+            for (int i = 0; i < 3; i++)
+            {
+                ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], dfc_duty_arr[i]));
+            }
+            // count++;
         }
         else
         {
-            foc_dq_coord.d = esc_u / esc_u_max;
+            // ESP_LOGE("ESC", "Error with taking gptimer_semaphore, %lu", count);
+            // count = 0;
         }
+    }
+}
 
-        foc_el_phi_deg = (float)(esc_cap_data.cur_pos - foc_bias) / 2400 * 360 * 14 + esc_dir * 90;
-        if(foc_el_phi_deg >= 360)
+void servo_task(void *pvParameters)
+{
+    ESP_LOGI("Servo", "Task started");
+    TickType_t xLastTake = 0;
+    calibration();
+    if (!flag_mcpwm_cap_activated)
+    {
+        ESP_ERROR_CHECK(mcpwm_capture_timer_start(mcpwm_cap_timer));
+        ESP_ERROR_CHECK(mcpwm_capture_channel_enable(mcpwm_cap_channel_A));
+        ESP_ERROR_CHECK(mcpwm_capture_channel_enable(mcpwm_cap_channel_B));
+        flag_mcpwm_cap_activated = true;
+    }
+    mcpwm_cap_data_t servo_cap_data = {0, 0, 0, 0};
+
+    ESP_ERROR_CHECK(gptimer_start(gptimer));
+    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
+
+    while (true)
+    {
+        if (xSemaphoreTake(gptimer_semaphore, pdMS_TO_TICKS(2)) == pdTRUE)
         {
-            foc_el_phi_deg -= 360;
+            if (xQueueReceive(mcpwm_cap_queue, &servo_cap_data, 0) == pdPASS)
+            {
+                if (servo_cap_data.per != 0)
+                {
+                    esc_avg_prev = esc_avg;
+                    esc_speed = speed_coef * (servo_cap_data.cur_pos - servo_cap_data.prev_pos) / servo_cap_data.per;
+                    esc_avg = esc_avg_prev * (1.0 - esc_gamma) + esc_speed * esc_gamma;
+                    servo_r = servo_goal - servo_cap_data.cur_pos;
+                }
+                xLastTake = xTaskGetTickCount();
+            }
+            else
+            {
+                if (pdTICKS_TO_MS(xTaskGetTickCount() - xLastTake) >= 1)
+                {
+                    esc_avg_prev = esc_avg;
+                    esc_speed = 0;
+                    esc_avg = esc_avg_prev * (1.0 - esc_gamma) + esc_speed * esc_gamma;
+                    servo_r = servo_goal - servo_cap_data.cur_pos;
+                    xLastTake = xTaskGetTickCount();
+                }
+            }
+            servo_up = servo_kp * servo_r;
+
+            servo_ui += servo_ki * servo_r;
+            servo_ui = (servo_ui > servo_ui_max) ? servo_ui_max : (servo_ui < -servo_ui_max) ? -servo_ui_max : servo_ui;
+
+            servo_u = servo_up + servo_ui;
+
+            servo_u = (servo_u > servo_u_max) ? servo_u_max : (servo_u < -servo_u_max) ? -servo_u_max : servo_u;
+
+            esc_goal = servo_speed_coef * servo_u;
+            esc_r = esc_goal - esc_avg;
+            esc_up = esc_kp * esc_r;
+
+            esc_ui += esc_ki * esc_r;
+            esc_ui = (esc_ui > esc_ui_max) ? esc_ui_max : (esc_ui < -esc_ui_max) ? -esc_ui_max : esc_ui;
+            esc_u = esc_up + esc_ui;
+
+            esc_dir = (esc_u > 0) ? 1 : -1;
+            esc_u = (abs(esc_u) > esc_u_max) ? esc_u_max : abs(esc_u);
+
+            if (servo_cap_data.znak != esc_dir)
+            {
+                dfc_dq_coord.d = esc_koef * esc_u / esc_u_max;
+            }
+            else
+            {
+                dfc_dq_coord.d = esc_u / esc_u_max;
+            }
+
+            dfc_el_phi_deg = (float)(servo_cap_data.cur_pos - dfc_bias) / 2400 * 360 * 14 + esc_dir * 90;
+            if(dfc_el_phi_deg >= 360)
+            {
+                dfc_el_phi_deg -= 360;
+            }
+            else if (dfc_el_phi_deg <= -360)
+            {
+                dfc_el_phi_deg += 360;
+            }
+            dfc_el_phi_rad = dfc_el_phi_deg * M_PI / 180;
+
+            foc_inverse_park_transform(dfc_el_phi_rad, &dfc_dq_coord, &dfc_ab_coord);
+            foc_inverse_clark_transform(&dfc_ab_coord, &dfc_uvw_coord);
+
+            dfc_duty_arr[0] = (int)(mcpwm_per * (dfc_uvw_coord.u / 4 + 1.0 / 4));
+            dfc_duty_arr[1] = (int)(mcpwm_per * (dfc_uvw_coord.v / 4 + 1.0 / 4));
+            dfc_duty_arr[2] = (int)(mcpwm_per * (dfc_uvw_coord.w / 4 + 1.0 / 4));
+
+            for (int i = 0; i < 3; i++)
+            {
+                ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], dfc_duty_arr[i]));
+            }
+            // count++;
         }
-        else if (foc_el_phi_deg <= -360)
+        else
         {
-            foc_el_phi_deg += 360;
-        }
-        foc_el_phi_rad = foc_el_phi_deg * M_PI / 180;
-
-        foc_inverse_park_transform(foc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
-        foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
-
-        foc_duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
-        foc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
-        foc_duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
-
-        for (int i = 0; i < 3; i++)
-        {
-            ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[i], foc_duty_arr[i]));
+            // ESP_LOGE("ESC", "Error with taking gptimer_semaphore, %lu", count);
+            // count = 0;
         }
     }
 }
@@ -988,6 +1170,22 @@ void telemetry_task(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
+
+void timer_task(void *pvParameters)
+{
+    uint32_t cycle;
+    TickType_t xLastWake = xTaskGetTickCount();
+
+    while(1)
+    {
+        cycle = count;
+        count = 0;
+        ESP_LOGI("Timer", "%lu", cycle);
+        vTaskDelayUntil(&xLastWake, pdMS_TO_TICKS(1000));
+    }
+}
+
+// Main
 
 void app_main(void)
 {
