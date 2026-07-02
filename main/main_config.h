@@ -62,7 +62,7 @@
 #define PIN_B                   (16)
 
 #define PIN_3V_1                (12)
-#define PIN_3V_2                (39)
+// #define PIN_3V_2                (39)
 
 #define DUTY_RESOLUTION_BIT     (8)
 #define DEFAULT_PAUSE           (100)

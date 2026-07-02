@@ -12,7 +12,7 @@
 #include "driver/mcpwm_cmpr.h"
 #include "driver/mcpwm_gen.h"
 #include "driver/mcpwm_cap.h"
-// #include "driver/twai.h"
+#include "driver/twai.h"
 #include "driver/pulse_cnt.h"
 #include "esp_netif.h"
 #include "esp_eth.h"
@@ -47,6 +47,10 @@ QueueHandle_t telemetry_queue;
 int num_command = 0;
 int current_task = 0;
 volatile uint32_t count = 0;
+
+twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_5, GPIO_NUM_35, TWAI_MODE_NORMAL);
+twai_timing_config_t t_config = TWAI_TIMING_CONFIG_1MBITS();
+twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
 // GPTimer
 
@@ -712,6 +716,48 @@ void foc_inverse_clark_transform(dfc_ab_coord_t *ab, dfc_uvw_coord_t *uvw)
     uvw->w = -uvw->u - uvw->v; 
 }
 
+void twai_command_task(void *pvParameters)
+{
+    twai_message_t message = {
+        .extd = 0,              // Standard Format message (11-bit ID)
+        .rtr = 0,               // Send a data frame
+        .ss = 1,                // Is single shot (won't retry on error or NACK)
+        .self = 0,              // Not a self reception request
+        .dlc_non_comp = 0,      // DLC is less than 8
+
+        // Message ID and payload
+        .identifier = 0,
+        .data_length_code = 1,
+        .data = {0} 
+    };
+    while (1)
+    {
+        if (twai_receive(&message, pdMS_TO_TICKS(2000)) != ESP_OK)
+        {
+            ESP_LOGE("TWAI", "Failed to receive");
+        }
+        else
+        {
+            if (message.identifier == 2 && message.data[0] == 111 && current_task == 0)
+            {
+                xTaskCreate(dfc_task, "Direct_Field_Control", 4096, NULL, 2, &dfc_task_handle);
+                current_task = 1;
+            }
+            else if (message.identifier == 2 && message.data[0] == 125 && current_task == 1)
+            {
+                ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
+                ESP_ERROR_CHECK(gptimer_stop(gptimer));
+                vTaskDelete(dfc_task_handle);
+                current_task = 0;
+            }
+            else
+            {
+                ESP_LOGE("Twai", "Wrong Data");
+            }
+        }
+    }
+}
+
 // Initializations
 
 void pins_init()
@@ -744,9 +790,9 @@ void pins_init()
     gpio_set_direction(PIN_3V_1, GPIO_MODE_OUTPUT);
     gpio_set_level(PIN_3V_1, 1);
 
-    gpio_reset_pin(PIN_3V_2);
-    gpio_set_direction(PIN_3V_2, GPIO_MODE_OUTPUT);
-    gpio_set_level(PIN_3V_2, 1);
+    // gpio_reset_pin(PIN_3V_2);
+    // gpio_set_direction(PIN_3V_2, GPIO_MODE_OUTPUT);
+    // gpio_set_level(PIN_3V_2, 1);
 }
 
 void pcnt_init()
@@ -1195,6 +1241,16 @@ void app_main(void)
     mcpwm_capture_init();
     gptimer_init();
 
+    if (twai_driver_install(&g_config, &t_config, &f_config) != ESP_OK)
+    {
+        ESP_LOGI(TAG, "Failed to install twai driver");
+    }
+
+    if (twai_start() != ESP_OK)
+    {
+        ESP_LOGI(TAG, "Failed to start twai");
+    }
+
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) 
     {
@@ -1228,6 +1284,7 @@ void app_main(void)
 
     vTaskDelay(pdMS_TO_TICKS(1000));
 
+    xTaskCreate(twai_command_task, "Twai", 4096, NULL, 1, NULL);
     t_command cmd;
     while (1)
     {
