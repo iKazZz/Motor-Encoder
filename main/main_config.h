@@ -10,7 +10,7 @@
 #define QUEUE_SIZE              (1)
 #define COMMAND_MAX_SIZE        (1024)
 
-#define WIFI_AP_SSID            "StepperController"
+#define WIFI_AP_SSID            "MicroMetron"
 #define WIFI_AP_PASS            ""
 #define WIFI_AP_CHANNEL         (0)
 
@@ -22,7 +22,7 @@
 // #define DEFAULT_WIFI_STA_PASS   "yPYAEyYsUE"
 // #define DEFAULT_WIFI_STA_PASS   "25049025"
 
-#define DEFAULT_STATIC_IP_ADDR  "192.168.1.10"
+#define DEFAULT_STATIC_IP_ADDR  "192.168.1.11"
 // #define DEFAULT_STATIC_IP_ADDR  "192.168.0.10"
 // #define DEFAULT_STATIC_IP_ADDR  "192.168.0.50"
 
@@ -30,18 +30,21 @@
 #define STATIC_GW_ADDR          "192.168.1.1"
 #define PORT                    (4242)
 
-#define NVS_STORAGE             "stepper"
+#define NVS_STORAGE             "MiM"
 #define NVS_STR_CONFIG          "config"
 
 #define STR_IP_ADDR             "ip_addr"
 #define STR_SSID                "ssid"
 #define STR_PASS                "password"
 
-#define STR_STEP_PERIOD_FWD     "step_period_fwd_us"
-#define STR_STEP_PERIOD_BWD     "step_period_bwd_us"
-#define STR_STEPS               "steps"
-#define STR_PAUSE               "pause_ms"
-#define STR_CALIBRATION_TIMEOUT "calibration_timeout_ms"
+#define STR_ESC_KP              "esc_kp"
+#define STR_ESC_KI              "esc_ki"
+#define STR_SERVO_KP            "servo_kp"
+#define STR_SERVO_KI            "servo_ki"
+#define STR_SERVO_KD            "servo_kd"
+#define STR_CUR_MAX             "cur_max"
+
+
 
 #define STR_FLAG_SEND_TELEMETRY "send_telemetry"
 #define STR_TELEMETRY           "telemetry"
@@ -67,5 +70,4 @@
 #define DUTY_RESOLUTION_BIT     (8)
 #define DEFAULT_PAUSE           (100)
 #define DEFAULT_CALIBRATION_TIMEOUT (100)
-#define GRAPH_ARRAY_SIZE        (200)
 

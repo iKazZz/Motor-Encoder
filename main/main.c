@@ -6,7 +6,6 @@
 #include "freertos/task.h"
 #include "driver/gpio.h"
 #include "driver/gptimer.h"
-// #include "driver/ledc.h"
 #include "driver/mcpwm_timer.h"
 #include "driver/mcpwm_oper.h"
 #include "driver/mcpwm_cmpr.h"
@@ -27,9 +26,9 @@
 #include "lwip/sys.h"
 #include "nvs_flash.h"
 #include "nvs.h"
-// #include "servosila_sc.h"
 #include <cJSON.h>
 #include <math.h>
+#include "mim_commands.h"
 
 
 #ifndef max
@@ -40,17 +39,43 @@
     #define min(a,b)            (((a) < (b)) ? (a) : (b))
 #endif
 
-bool flag_send_telemetry = false;
+#define NUM_CMD_ERROR                   (-100)
+#define NUM_CMD_TELEMETRY               (-1)
+#define NUM_CMD_READ_CONFIG_FROM_DRV    (-2)
+#define NUM_CMD_SEND_CONFIG_TO_DRV      (-3)
+#define NUM_CMD_SAVE_TO_FLASH           (-4)
+#define NUM_CMD_READ_FROM_FLASH         (-5)
+#define NUM_CMD_STOP                    (0)
+#define NUM_CMD_CALIBRATION             (1)
+#define NUM_CMD_DFC                     (2)
+#define NUM_CMD_FOC                     (3)
+#define NUM_CMD_ESC                     (4)
+#define NUM_CMD_SERVO                   (5)
+
+#define NUM_TASK_IDLE                   (0)
+#define NUM_TASK_CALIBRATION            (1)
+#define NUM_TASK_DFC                    (2)
+#define NUM_TASK_FOC                    (3)
+#define NUM_TASK_ESC                    (4)
+#define NUM_TASK_SERVO                  (5)
+
+// TODO: Подумать про нормальные логи (в том числе отладочные)
+// TODO: Прибраться в коде
+
+
+bool flag_send_telemetry = true;
 bool current_telemetry = false;
 QueueHandle_t telemetry_queue;
 
-int num_command = 0;
-int current_task = 0;
+int current_task = NUM_TASK_IDLE;
 volatile uint32_t count = 0;
 
 twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(GPIO_NUM_5, GPIO_NUM_35, TWAI_MODE_NORMAL);
 twai_timing_config_t t_config = TWAI_TIMING_CONFIG_1MBITS();
 twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+int can = CAN_ID_COMMANDER;
+float max_encoder_speed = 0;
+float max_electrical_speed = 0;
 
 // GPTimer
 
@@ -96,9 +121,8 @@ int dfc_duty_arr[3] = {0, 0, 0};
 float dfc_el_phi_deg = 0;
 float dfc_el_phi_rad = 0;
 float dfc_el_freq = 4;
-int dfc_bias = 0;
-int dfc_dir = 1;
-float dfc_speed = 1;
+float dfc_speed = 5;
+float dfc_current = 1;
 
 typedef struct dfc_uvw_coord {
     float u;
@@ -119,6 +143,16 @@ typedef struct dfc_dq_coord {
 dfc_uvw_coord_t dfc_uvw_coord = {0, 0, 0};
 dfc_ab_coord_t dfc_ab_coord = {0, 0};
 dfc_dq_coord_t dfc_dq_coord = {1, 0};
+
+// FOC
+
+int foc_bias = 0;
+int foc_dir = 1;
+float foc_current = 1;
+
+dfc_uvw_coord_t foc_uvw_coord = {0, 0, 0};
+dfc_ab_coord_t foc_ab_coord = {0, 0};
+dfc_dq_coord_t foc_dq_coord = {1, 0};
 
 // Pulse counter
 
@@ -259,7 +293,7 @@ bool aboba(mcpwm_cap_channel_handle_t chan, const mcpwm_capture_event_data_t *ed
 
     mcpwm_cap_data.znak = (mcpwm_cap_data.cur_pos > mcpwm_cap_data.prev_pos) ? 1 : -1;
 
-    if ((current_task == 2) || (current_task == 3) || (current_task == 4)) xQueueOverwriteFromISR(mcpwm_cap_queue, &mcpwm_cap_data, &xHigherPriorityTaskWoken);
+    if ((current_task == NUM_TASK_FOC) || (current_task == NUM_TASK_ESC) || (current_task == NUM_TASK_SERVO)) xQueueOverwriteFromISR(mcpwm_cap_queue, &mcpwm_cap_data, &xHigherPriorityTaskWoken);
     if (current_telemetry) xQueueOverwriteFromISR(telemetry_queue, &mcpwm_cap_data, &xHigherPriorityTaskWoken);
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 
@@ -273,6 +307,7 @@ mcpwm_capture_event_callbacks_t aaa = {
 // ESC
 
 float esc_speed = 0;
+float esc_cur_goal = 0;
 float esc_goal = 1;
 float esc_r = 0;
 float esc_kp = 0.1;
@@ -294,6 +329,7 @@ float esc_avg = 0;
 float esc_avg_prev = 0;
 
 float speed_coef = 80000000 / 2400;
+float esc_max_speed;
 
 // Servo
 
@@ -321,7 +357,7 @@ float servo_speed_coef = 0.00025;
 
 void nvs_read_config();
 void nvs_write_config();
-char* build_config_string(bool for_nvs);
+char* build_json_string(bool flag_for_nvs);
 
 static const char *TAG = "step_controller";
 
@@ -329,9 +365,11 @@ char g_ip_addr[64]  = DEFAULT_STATIC_IP_ADDR;
 char g_ssid[64]     = DEFAULT_WIFI_STA_SSID;
 char g_pass[64]     = DEFAULT_WIFI_STA_PASS;
 
-
+bool flag_calibrated = false;
 mcpwm_cap_data_t telemetry_cap_data = {0, 0, 0, 0};
 
+TaskHandle_t calibration_task_handle;
+void calibration_task(void *pvParameters);
 TaskHandle_t dfc_task_handle;
 void dfc_task(void *pvParameters);
 TaskHandle_t foc_task_handle;
@@ -345,281 +383,209 @@ void telemetry_task(void *pvParameters);
 TaskHandle_t timer_task_handle;
 void timer_task(void *pvParameters);
 
+
 QueueHandle_t g_command_queue;
-struct sockaddr_storage g_last_cmd_source_addr; // TODO: mutex protect
+struct sockaddr_storage g_last_cmd_source_addr;
 int g_last_sock;
 t_command cmd;
 
-char* build_telemetry_string()
+bool flag_WiFi_en = true;
+bool flag_TWAI_en = false;
+
+twai_message_t cmd_message = {
+    .extd = 0,              // Standard Format message (11-bit ID)
+    .rtr = 0,               // Send a data frame
+    .ss = 1,                // Is single shot (won't retry on error or NACK)
+    .self = 0,              // Not a self reception request
+    .dlc_non_comp = 0,      // DLC is less than 8
+
+    // Message ID and payload
+    .identifier = CAN_ID_DRIVER,
+    .data_length_code = 6,
+    .data = {0, 0, 0, 0, 0, 0} 
+};
+
+int parse_json_string(const char *str)
 {
-    cJSON *json = cJSON_CreateObject();
-
-    cJSON_AddBoolToObject(json, STR_TELEMETRY, flag_send_telemetry);
-    cJSON_AddNumberToObject(json, "time", mcpwm_cap_data.cur_tick / 800000);
-    if (telemetry_cap_data.per != 0) cJSON_AddNumberToObject(json, "speed", 
-        speed_coef * (telemetry_cap_data.cur_pos - telemetry_cap_data.prev_pos) / telemetry_cap_data.per);
-    else cJSON_AddNumberToObject(json, "speed", 0);
-    cJSON_AddNumberToObject(json, "pos", telemetry_cap_data.cur_pos);
-    cJSON_AddNumberToObject(json, "servo_ui", servo_ui);
-    cJSON_AddNumberToObject(json, "esc_ui", esc_ui);
-    cJSON_AddNumberToObject(json, "esc_goal", esc_goal);
-
-    char* str = cJSON_Print(json);
-    cJSON_Delete(json);
-    return str;
-}
-
-char* build_config_string(bool for_nvs)
-{
-    cJSON *json = cJSON_CreateObject();
-
-    cJSON_AddStringToObject(json, STR_IP_ADDR, g_ip_addr);
-    cJSON_AddStringToObject(json, STR_SSID, g_ssid);
-    cJSON_AddStringToObject(json, STR_PASS, g_pass);
-    cJSON_AddNumberToObject(json, "esc_kp", esc_kp);
-    cJSON_AddNumberToObject(json, "esc_ki", esc_ki);
-    cJSON_AddNumberToObject(json, "esc_ki_max", esc_ki_max);
-    cJSON_AddNumberToObject(json, "esc_ki_coef", esc_ki_coef);
-    cJSON_AddNumberToObject(json, "esc_ui_max", esc_ui_max);
-    cJSON_AddNumberToObject(json, "esc_goal", esc_goal);
-    cJSON_AddNumberToObject(json, "servo_kp", servo_kp);
-    cJSON_AddNumberToObject(json, "servo_ki", servo_ki);
-    cJSON_AddNumberToObject(json, "servo_ui_max", servo_ui_max);
-    cJSON_AddNumberToObject(json, "servo_goal", servo_goal);
-    cJSON_AddNumberToObject(json, "servo_speed_coef", servo_speed_coef);
-    cJSON_AddNumberToObject(json, "esc_gamma", esc_gamma);
-    cJSON_AddNumberToObject(json, "esc_koef", esc_koef);
-    cJSON_AddNumberToObject(json, "dfc_speed", dfc_speed);
-
-    if (!for_nvs)
-    {
-    }
-
-    char* str = cJSON_Print(json);
-    cJSON_Delete(json);
-    return str;
-}
-
-void parse_config_string(const char *str)
-{
+    int num_command = NUM_CMD_STOP;
     cJSON *parsed_cmd = cJSON_Parse(str);
     if (!parsed_cmd)
     {
-        ESP_LOGE(TAG, "Failed to parse config string");
+        ESP_LOGE("JSON", "Failed to parse config string");
+        return NUM_CMD_ERROR;
+    }
+    else
+    {    
+        cJSON *command_object = cJSON_GetArrayItem(parsed_cmd, 0);
+        char *command_type = command_object->string;
+
+        if (!strcmp(command_type, "motion_control")) 
+        {
+            cJSON *mode_object = cJSON_GetArrayItem(command_object, 0);
+            char *mode_name = mode_object->string;
+
+            if (!strcmp(mode_name, "dfc"))
+            {
+                num_command = NUM_CMD_DFC;
+                for (int i=0; i < cJSON_GetArraySize(mode_object); i++)
+                {   
+                    cJSON *parameter_object = cJSON_GetArrayItem(mode_object, i);
+                    char *param_name = parameter_object->string;
+
+                    if (!strcmp(param_name, "dfc_current"))
+                    {
+                        if (parameter_object->valuedouble > 0)
+                        {
+                            dfc_current = (parameter_object->valuedouble > 1) ? 1 : fabs(parameter_object->valuedouble);
+                        }
+                        dfc_dq_coord.d = dfc_current;
+                    }
+                    else if (!strcmp(param_name, "dfc_speed")) dfc_speed = parameter_object->valuedouble;
+
+                    free(param_name);
+                }
+            }
+            else if (!strcmp(mode_name, "foc"))
+            {
+                num_command = NUM_CMD_FOC;
+                for (int i=0; i < cJSON_GetArraySize(mode_object); i++)
+                {   
+                    cJSON *parameter_object = cJSON_GetArrayItem(mode_object, i);
+                    char *param_name = parameter_object->string;
+
+                    if (!strcmp(param_name, "foc_current"))
+                    {
+                        foc_current = parameter_object->valuedouble;
+                        if (foc_current < 0)
+                        {
+                            foc_dir = -1;
+                            foc_dq_coord.d = (foc_current < -1) ? 1 : fabs(foc_current);
+                        }
+                        else
+                        {
+                            foc_dir = 1;
+                            foc_dq_coord.d = (foc_current > 1) ? 1 : foc_current;
+                        }
+                    }
+
+                    free(param_name);
+                }
+            }
+            else if (!strcmp(mode_name, "esc"))
+            {
+                num_command = NUM_CMD_ESC;
+                for (int i=0; i < cJSON_GetArraySize(mode_object); i++)
+                {   
+                    cJSON *parameter_object = cJSON_GetArrayItem(mode_object, i);
+                    char *param_name = parameter_object->string;
+
+                    if (!strcmp(param_name, "esc_goal")) esc_goal = parameter_object->valuedouble;
+
+                    free(param_name);
+                }
+            }
+            else if (!strcmp(mode_name, "servo"))
+            {
+                num_command = NUM_CMD_SERVO;
+                for (int i=0; i < cJSON_GetArraySize(mode_object); i++)
+                {   
+                    cJSON *parameter_object = cJSON_GetArrayItem(mode_object, i);
+                    char *param_name = parameter_object->string;
+
+                    if (!strcmp(param_name, "servo_goal")) servo_goal = parameter_object->valueint;
+
+                    free(param_name);
+                }
+            }
+            else if (!strcmp(mode_name, "stop")) num_command = NUM_CMD_STOP;
+            else if (!strcmp(mode_name, "calibration")) num_command = NUM_CMD_CALIBRATION;
+        }
+        else if (!strcmp(command_type, "nvs"))
+        {
+            if (!strcmp(command_object->valuestring, "save_to_flash")) num_command = NUM_CMD_SAVE_TO_FLASH;
+            else if (!strcmp(command_object->valuestring, "read_from_flash")) num_command = NUM_CMD_READ_FROM_FLASH;
+        }
+        else if (!strcmp(command_type, "telemetry")) 
+        {
+            flag_send_telemetry = command_object->valueint;
+            num_command = NUM_CMD_TELEMETRY;
+            ESP_LOGI("Eth", "Telemetry will be %d", flag_send_telemetry);
+        }
+        else if (!strcmp(command_type, "config"))
+        {
+            cJSON *config_cmd = cJSON_GetArrayItem(command_object, 0);
+            if (!strcmp(config_cmd->string, "send"))
+            {
+                num_command = NUM_CMD_SEND_CONFIG_TO_DRV;
+                for (int i=0; i < cJSON_GetArraySize(config_cmd); i++)
+                {   
+                    cJSON *config_pair = cJSON_GetArrayItem(config_cmd, i);
+                    char *param_name = config_pair->string;
+
+                    if (!strcmp(param_name, "servo_kp")) servo_kp = config_pair->valuedouble; 
+                    else if (!strcmp(param_name, "servo_ki")) servo_ki = config_pair->valuedouble;
+                    else if (!strcmp(param_name, "servo_kd")) servo_kd = config_pair->valuedouble;
+                    else if (!strcmp(param_name, "servo_ui_max")) servo_ui_max = config_pair->valuedouble;
+                    else if (!strcmp(param_name, "esc_kp")) esc_kp = config_pair->valuedouble;
+                    else if (!strcmp(param_name, "esc_ki")) esc_ki = config_pair->valuedouble;
+                    else if (!strcmp(param_name, "esc_gamma")) esc_gamma = config_pair->valuedouble;
+                    else if (!strcmp(param_name, "esc_ui_max")) esc_ui_max = config_pair->valuedouble;
+                    else if (!strcmp(param_name, "servo_speed_coef")) servo_speed_coef = config_pair->valuedouble;
+                    else if (!strcmp(param_name, "esc_max_speed")) esc_max_speed = config_pair->valuedouble;
+
+                    free(param_name);
+                }
+            }
+            else if (!strcmp(config_cmd->string, "read"))
+            {
+                num_command = NUM_CMD_READ_CONFIG_FROM_DRV;
+            }
+        }
+
+        free(command_type);
+        return num_command;
+    }
+}
+
+char* build_json_string(bool flag_for_nvs)
+{
+    // TODO: добавить условие не для nvs, чтобы отправлять по eth
+    cJSON *json = cJSON_CreateObject();
+    cJSON *config = cJSON_CreateObject();
+
+    if (flag_for_nvs)
+    {
+        cJSON_AddStringToObject(config, "WiFi SSID", DEFAULT_WIFI_STA_SSID);
+        cJSON_AddStringToObject(config, "WiFi IP", DEFAULT_STATIC_IP_ADDR);
+        cJSON_AddNumberToObject(config, "CAN", CAN_ID_DRIVER);
+        cJSON_AddNumberToObject(config, "max_encoder_speed", max_encoder_speed);
+        cJSON_AddNumberToObject(config, "max_electrical_speed", max_electrical_speed);
+        cJSON_AddNumberToObject(config, "bias", foc_bias);
     }
     else
     {
-        bool flag_got_command = false;
-        if (cJSON_HasObjectItem(parsed_cmd, "type"))
-        {
-            cJSON *type = cJSON_GetObjectItem(parsed_cmd, "type");
-            char *type_str = cJSON_GetStringValue(type);
-            if (!type_str) ESP_LOGE(TAG, "Invalid type field");
-            else 
-            {
-                ESP_LOGI(TAG, "Type field: %s", type_str);
-                if (!strcmp(type_str, "cmd")) flag_got_command = true;
-            }
-        }
-        
-        for (int i=0; i < cJSON_GetArraySize(parsed_cmd); i++)
-        {   
-            cJSON *subitem = cJSON_GetArrayItem(parsed_cmd, i);
+        cJSON_AddNumberToObject(config, "esc_goal", esc_goal);
+        cJSON_AddNumberToObject(config, "dfc_speed", dfc_speed);
+        cJSON_AddNumberToObject(config, "foc_current", foc_current);
+        cJSON_AddNumberToObject(config, "dfc_current", dfc_current);
+        cJSON_AddNumberToObject(config, "servo_goal", servo_goal);
+        cJSON_AddNumberToObject(config, "servo_kp", servo_kp);
+        cJSON_AddNumberToObject(config, "servo_ki", servo_ki);
+        cJSON_AddNumberToObject(config, "servo_kd", servo_kd);  
+        cJSON_AddNumberToObject(config, "servo_ui_max", servo_ui_max);
+        cJSON_AddNumberToObject(config, "esc_kp", esc_kp);
+        cJSON_AddNumberToObject(config, "esc_ki", esc_ki);
+        cJSON_AddNumberToObject(config, "esc_gamma", esc_gamma);
+        cJSON_AddNumberToObject(config, "esc_ui_max", esc_ui_max);
+        cJSON_AddNumberToObject(config, "servo_speed_coef", servo_speed_coef);
+        cJSON_AddNumberToObject(config, "esc_max_speed", esc_max_speed);
 
-            // ESP_LOGI(TAG, "Item %s", subitem->string);
-            
-            char *param_name = subitem->string;
-
-            if (!strcmp(param_name, "cmd1")) 
-            {
-                if (!strcmp(subitem->valuestring, "stop")) num_command = -1;
-                if (!strcmp(subitem->valuestring, "dfc")) num_command = 1;
-                if (!strcmp(subitem->valuestring, "foc")) num_command = 2;
-                if (!strcmp(subitem->valuestring, "esc")) num_command = 3;
-                if (!strcmp(subitem->valuestring, "servo")) num_command = 4;
-            }
-            else if (!strcmp(param_name, "telemetry")) 
-            {
-                flag_send_telemetry = subitem->valueint;
-            }
-            else num_command = 0;
-        }
-        ESP_LOGI("Mine", "num_command = %d", num_command);
-
-        if (num_command == 0)
-        {
-            for (int i=0; i < cJSON_GetArraySize(parsed_cmd); i++)
-            {   
-                cJSON *subitem = cJSON_GetArrayItem(parsed_cmd, i);
-
-                ESP_LOGI(TAG, "Item %s", subitem->string);
-                
-                char *param_name = subitem->string;
-
-                if (!strcmp(param_name, STR_IP_ADDR)) strncpy(g_ip_addr, subitem->valuestring, sizeof(g_ip_addr)-1);
-                if (!strcmp(param_name, STR_SSID)) strncpy(g_ssid, subitem->valuestring, sizeof(g_ssid)-1);
-                if (!strcmp(param_name, STR_PASS)) strncpy(g_pass, subitem->valuestring, sizeof(g_pass)-1);
-                if (!strcmp(param_name, "esc_goal")) esc_goal = subitem->valuedouble;
-                if (!strcmp(param_name, "esc_kp")) esc_kp = subitem->valuedouble;
-                if (!strcmp(param_name, "esc_ki")) esc_ki = subitem->valuedouble;
-                if (!strcmp(param_name, "esc_ki_max")) esc_ki_max = subitem->valuedouble;
-                if (!strcmp(param_name, "esc_ki_coef")) esc_ki_coef = subitem->valuedouble;
-                if (!strcmp(param_name, "esc_ui_max")) esc_ui_max = subitem->valuedouble;
-                if (!strcmp(param_name, "servo_goal")) servo_goal = subitem->valuedouble;
-                if (!strcmp(param_name, "servo_kp")) servo_kp = subitem->valuedouble;
-                if (!strcmp(param_name, "servo_ki")) servo_ki = subitem->valuedouble;
-                if (!strcmp(param_name, "servo_ui_max")) servo_ui_max = subitem->valuedouble;
-                if (!strcmp(param_name, "servo_speed_coef")) servo_speed_coef = subitem->valuedouble;
-                if (!strcmp(param_name, "esc_gamma")) esc_gamma = subitem->valuedouble;
-                if (!strcmp(param_name, "esc_koef")) esc_koef = subitem->valuedouble;
-                if (!strcmp(param_name, "dfc_speed")) dfc_speed = subitem->valuedouble;
-                if (!strcmp(param_name, STR_CMD_READ_FLASH) && subitem->valueint) nvs_read_config();
-                if (!strcmp(param_name, STR_CMD_WRITE_FLASH) && subitem->valueint) nvs_write_config();
-            }
-        }
-        
     }
-
-    cJSON_Delete(parsed_cmd);
-}
-
-void command_processing_task(void *pvParameters)
-{
-    while (1)
-    {
-        ESP_LOGI(TAG, "Will wait command");
-        if (!xQueueReceive(g_command_queue, &cmd, portMAX_DELAY))
-        {
-            ESP_LOGI(TAG, "Failed to xQueueReceive");
-        }
-        else
-        {
-            ESP_LOGI(TAG, "Got command %s", cmd.cmd);            
-            g_last_cmd_source_addr = cmd.source_addr;
-            g_last_sock = cmd.sock;
-            parse_config_string(cmd.cmd);
-            
-            char *config_to_send = build_config_string(false);            
-            if (config_to_send)
-            {
-                // ESP_LOGI(TAG, "Will send config %s", config_to_send);
-                int err = sendto(cmd.sock, config_to_send, strlen(config_to_send), 0, (struct sockaddr *)&cmd.source_addr, sizeof(struct sockaddr));
-                if (err < 0) 
-                {
-                    ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-                }
-            }
-            free(config_to_send);
-
-            if (!current_telemetry && flag_send_telemetry)
-            {
-                telemetry_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
-                xTaskCreate(telemetry_task, "Telemetry", 4096, NULL, 1, &telemetry_task_handle);
-                current_telemetry = true;
-            }
-            else if (current_telemetry && !flag_send_telemetry)
-            {
-                if (current_task == 0 || current_task == 1)
-                {
-                    ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_A));
-                    ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_B));
-                    ESP_ERROR_CHECK(mcpwm_capture_timer_stop(mcpwm_cap_timer));
-                    flag_mcpwm_cap_activated = false;
-                }
-                vTaskDelete(telemetry_task_handle);
-                current_telemetry = false;
-                vQueueDelete(telemetry_queue);
-                ESP_LOGI("Telemetry", "stopped");
-            }
-
-            if (current_task == 0)
-            {
-                if (num_command == 1)
-                {
-                    xTaskCreate(dfc_task, "Direct_Field_Control", 4096, NULL, 2, &dfc_task_handle);
-                    current_task = 1;
-                }
-                else if (num_command == 2)
-                {
-                    mcpwm_cap_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
-                    xTaskCreate(foc_task, "Field_Oriented_Control", 4096, NULL, 2, &foc_task_handle);
-                    current_task = 2;
-                }
-                else if (num_command == 3)
-                {
-                    mcpwm_cap_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
-                    xTaskCreate(esc_task, "Electrical_Speed_Control", 4096, NULL, 2, &esc_task_handle);
-                    // xTaskCreate(timer_task, "Timer", 4096, NULL, 1, &timer_task_handle);
-                    current_task = 3;
-                }
-                else if (num_command == 4)
-                {
-                    mcpwm_cap_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
-                    xTaskCreate(servo_task, "Servo_Control", 4096, NULL, 2, &servo_task_handle);
-                    current_task = 4;
-                }
-            }
-
-            if (num_command == -1)
-            {
-                if (current_task == 1)
-                {
-                    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
-                    ESP_ERROR_CHECK(gptimer_stop(gptimer));
-                    vTaskDelete(dfc_task_handle);
-                    current_task = 0;
-                }
-                else if (current_task == 2)
-                {
-                    if (!current_telemetry)
-                    {
-                        ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_A));
-                        ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_B));
-                        ESP_ERROR_CHECK(mcpwm_capture_timer_stop(mcpwm_cap_timer));
-                        flag_mcpwm_cap_activated = false;
-                    }
-                    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
-                    vTaskDelete(foc_task_handle);
-                    current_task = 0;
-                    vQueueDelete(mcpwm_cap_queue);
-                }
-                else if (current_task == 3)
-                {
-                    if (!current_telemetry)
-                    {
-                        ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_A));
-                        ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_B));
-                        ESP_ERROR_CHECK(mcpwm_capture_timer_stop(mcpwm_cap_timer));
-                        flag_mcpwm_cap_activated = false;
-                    }
-                    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
-                    ESP_ERROR_CHECK(gptimer_stop(gptimer));
-                    vTaskDelete(esc_task_handle);
-
-                    // vTaskDelete(timer_task_handle);
-                    current_task = 0;
-                    vQueueDelete(mcpwm_cap_queue);
-                }
-                else if (current_task == 4)
-                {
-                    if (!current_telemetry)
-                    {
-                        ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_A));
-                        ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_B));
-                        ESP_ERROR_CHECK(mcpwm_capture_timer_stop(mcpwm_cap_timer));
-                        flag_mcpwm_cap_activated = false;
-                    }
-                    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
-                    ESP_ERROR_CHECK(gptimer_stop(gptimer));
-
-                    vTaskDelete(servo_task_handle);
-                    current_task = 0;
-                    vQueueDelete(mcpwm_cap_queue);
-                }
-            }
-        }
-    }
-    vTaskDelete(NULL);
+    
+    cJSON_AddItemToObject(json, "config", config);
+    char *str = cJSON_Print(json);
+    cJSON_Delete(json);
+    return str;
 }
 
 void nvs_read_config()
@@ -656,7 +622,7 @@ void nvs_read_config()
             }
 
             ESP_LOGI(TAG, "Read config %s", str);
-            parse_config_string(str);
+            parse_json_string(str);
 
             free(str);
         }
@@ -677,7 +643,7 @@ void nvs_write_config()
     else
     {
         ESP_LOGI(TAG, "Will build_config_string");
-        char *str = build_config_string(true);
+        char *str = build_json_string(true);
         if (str && strlen(str))
         {
             ESP_LOGI(TAG, "Write config %s", str);
@@ -703,6 +669,242 @@ void nvs_write_config()
     }
 }
 
+QueueHandle_t my_command_queue;
+
+void command_processing_task(void *pvParameters)
+{
+    int num_command;
+    my_command_queue = xQueueCreate(1, sizeof(int));
+    while(1)
+    {
+        if (!xQueueReceive(my_command_queue, &num_command, portMAX_DELAY))
+        {
+            ESP_LOGE("Eth", "Failed to xQueueReceive");
+        }
+        else
+        {
+            if (num_command == NUM_CMD_READ_CONFIG_FROM_DRV)
+            {
+                if (flag_TWAI_en)
+                {
+                    ESP_LOGI("AAA", "Will send config");
+                    mim_cmd_SEND_FLOAT(CAN_ID_DRIVER, MIM_CMD_GROUP_CONFIG, MIM_CMD_READ_DFC_SPEED, dfc_speed, 0);
+                    mim_cmd_SEND_FLOAT(CAN_ID_DRIVER, MIM_CMD_GROUP_CONFIG, MIM_CMD_READ_ESC_GOAL, esc_goal, 0);
+                    mim_cmd_SEND_FLOAT(CAN_ID_DRIVER, MIM_CMD_GROUP_CONFIG, MIM_CMD_READ_FOC_CURRENT, foc_current, 0);
+                    mim_cmd_SEND_FLOAT(CAN_ID_DRIVER, MIM_CMD_GROUP_CONFIG, MIM_CMD_READ_DFC_CURRENT, dfc_current, 0);
+                    mim_cmd_SEND_INT16(CAN_ID_DRIVER, MIM_CMD_GROUP_CONFIG, MIM_CMD_READ_SERVO_GOAL, servo_goal, 0);
+                    mim_cmd_SEND_INT16(CAN_ID_DRIVER, MIM_CMD_GROUP_CONFIG, MIM_CMD_READ_END_OF_CONFIG, 0, 0);
+                }
+                if (flag_WiFi_en)
+                {
+                    char *config_to_send = build_json_string(false);            
+                    if (config_to_send)
+                    {
+                        ESP_LOGI("AAA", "Will sent: %s", config_to_send);
+                        int err = sendto(cmd.sock, config_to_send, strlen(config_to_send), 0, (struct sockaddr *)&cmd.source_addr, sizeof(struct sockaddr));
+                        if (err < 0) 
+                        {
+                            ESP_LOGE("Eth", "Error occurred during sending: errno %d", errno);
+                        }
+                    }
+                    free(config_to_send);
+                }
+            }
+            else if (num_command == NUM_CMD_SEND_CONFIG_TO_DRV)
+            {
+                if (flag_WiFi_en)
+                {
+                    char *config_to_send = build_json_string(false);            
+                    if (config_to_send)
+                    {
+                        int err = sendto(cmd.sock, config_to_send, strlen(config_to_send), 0, (struct sockaddr *)&cmd.source_addr, sizeof(struct sockaddr));
+                        if (err < 0) 
+                        {
+                            ESP_LOGE("Eth", "Error occurred during sending: errno %d", errno);
+                        }
+                    }
+                    free(config_to_send);
+                }
+            }
+            else if (num_command == NUM_CMD_SAVE_TO_FLASH)
+            {
+                ESP_LOGI("nvs", "to wriiiite");
+                nvs_write_config();
+            }
+            else if (num_command == NUM_CMD_READ_FROM_FLASH)
+            {
+                if (flag_TWAI_en)
+                {
+                    ESP_LOGI("nvs", "to read");
+                    nvs_read_config();
+                }
+                if (flag_WiFi_en)
+                {
+                    ESP_LOGI("nvs", "to read");
+                    nvs_read_config();
+
+                    char *config_to_send = build_json_string(true);            
+                    if (config_to_send)
+                    {
+                        int err = sendto(cmd.sock, config_to_send, strlen(config_to_send), 0, (struct sockaddr *)&cmd.source_addr, sizeof(struct sockaddr));
+                        if (err < 0) 
+                        {
+                            ESP_LOGE("Eth", "Error occurred during sending: errno %d", errno);
+                        }
+                    }
+                    free(config_to_send);
+                }
+            }
+            else
+            {
+                if (current_task == NUM_TASK_IDLE)
+                {
+                    if (num_command == NUM_CMD_CALIBRATION)
+                    {
+                        ESP_LOGI("Calib", "");
+                        xTaskCreate(calibration_task, "Calibration", 4096, NULL, 3, &calibration_task_handle);
+                        current_task = NUM_TASK_CALIBRATION;
+                    }
+                    else if (num_command == NUM_CMD_DFC)
+                    {
+                        xTaskCreate(dfc_task, "Direct_Field_Control", 4096, NULL, 3, &dfc_task_handle);
+                        current_task = NUM_TASK_DFC;
+                    }
+                    else if (num_command == NUM_CMD_FOC)
+                    {
+                        mcpwm_cap_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
+                        xTaskCreate(foc_task, "Field_Oriented_Control", 4096, NULL, 3, &foc_task_handle);
+                        current_task = NUM_TASK_FOC;
+                    }
+                    else if (num_command == NUM_CMD_ESC)
+                    {
+                        mcpwm_cap_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
+                        xTaskCreate(esc_task, "Electrical_Speed_Control", 4096, NULL, 3, &esc_task_handle);
+                        // xTaskCreate(timer_task, "Timer", 4096, NULL, 1, &timer_task_handle);
+                        current_task = NUM_TASK_ESC;
+                    }
+                    else if (num_command == NUM_CMD_SERVO)
+                    {
+                        mcpwm_cap_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
+                        xTaskCreate(servo_task, "Servo_Control", 4096, NULL, 3, &servo_task_handle);
+                        current_task = NUM_TASK_SERVO;
+                    }
+                }
+                if (num_command == NUM_CMD_STOP)
+                {
+                    if (current_task == NUM_TASK_CALIBRATION)
+                    {
+                        vTaskDelete(calibration_task_handle);
+                        current_task = NUM_TASK_IDLE;
+                    }
+                    else if (current_task == NUM_TASK_DFC)
+                    {
+                        ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
+                        ESP_ERROR_CHECK(gptimer_stop(gptimer));
+                        vTaskDelete(dfc_task_handle);
+                        current_task = NUM_TASK_IDLE;
+                    }
+                    else if (current_task == NUM_TASK_FOC)
+                    {
+                        if (!current_telemetry)
+                        {
+                            ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_A));
+                            ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_B));
+                            ESP_ERROR_CHECK(mcpwm_capture_timer_stop(mcpwm_cap_timer));
+                            flag_mcpwm_cap_activated = false;
+                        }
+                        ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
+                        vTaskDelete(foc_task_handle);
+                        current_task = NUM_TASK_IDLE;
+                        vQueueDelete(mcpwm_cap_queue);
+                    }
+                    else if (current_task == NUM_TASK_ESC)
+                    {
+                        if (!current_telemetry)
+                        {
+                            ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_A));
+                            ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_B));
+                            ESP_ERROR_CHECK(mcpwm_capture_timer_stop(mcpwm_cap_timer));
+                            flag_mcpwm_cap_activated = false;
+                        }
+                        ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
+                        ESP_ERROR_CHECK(gptimer_stop(gptimer));
+                        vTaskDelete(esc_task_handle);
+
+                        // vTaskDelete(timer_task_handle);
+                        current_task = NUM_TASK_IDLE;
+                        vQueueDelete(mcpwm_cap_queue);
+                    }
+                    else if (current_task == NUM_TASK_SERVO)
+                    {
+                        if (!current_telemetry)
+                        {
+                            ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_A));
+                            ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_B));
+                            ESP_ERROR_CHECK(mcpwm_capture_timer_stop(mcpwm_cap_timer));
+                            flag_mcpwm_cap_activated = false;
+                        }
+                        ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
+                        ESP_ERROR_CHECK(gptimer_stop(gptimer));
+
+                        vTaskDelete(servo_task_handle);
+                        current_task = NUM_TASK_IDLE;
+                        vQueueDelete(mcpwm_cap_queue);
+                    }
+                }
+                else if (num_command == NUM_CMD_TELEMETRY)
+                {
+                    if (flag_send_telemetry && !current_telemetry)
+                    {
+                        telemetry_queue = xQueueCreate(1, sizeof(mcpwm_cap_data_t));
+                        xTaskCreate(telemetry_task, "Telemetry", 4096, NULL, 2, &telemetry_task_handle);
+                        current_telemetry = true;
+                    }
+                    else if (!flag_send_telemetry && current_telemetry)
+                    {
+                        if (current_task == NUM_TASK_IDLE || current_task == NUM_TASK_DFC)
+                        {
+                            ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_A));
+                            ESP_ERROR_CHECK(mcpwm_capture_channel_disable(mcpwm_cap_channel_B));
+                            ESP_ERROR_CHECK(mcpwm_capture_timer_stop(mcpwm_cap_timer));
+                            flag_mcpwm_cap_activated = false;
+                        }
+                        vTaskDelete(telemetry_task_handle);
+                        current_telemetry = false;
+                        vQueueDelete(telemetry_queue);
+                        ESP_LOGI("Telemetry", "stopped");
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+void ethernet_receive_task(void *pvParameters)
+{
+    int num_command;
+    while (1)
+    {
+        num_command = NUM_CMD_ERROR;
+        ESP_LOGI("Eth", "Will wait command");
+        if (!xQueueReceive(g_command_queue, &cmd, portMAX_DELAY))
+        {
+            ESP_LOGE("Eth", "Failed to xQueueReceive");
+        }
+        else
+        {
+            ESP_LOGI("Eth", "Got command");            
+            g_last_cmd_source_addr = cmd.source_addr;
+            g_last_sock = cmd.sock;
+            num_command = parse_json_string(cmd.cmd);
+            ESP_LOGI("eth", "%d", num_command);
+            if (num_command != NUM_CMD_ERROR) xQueueOverwrite(my_command_queue, &num_command);
+        }
+    }
+    vTaskDelete(NULL);
+}
+
 void foc_inverse_park_transform(float phi, dfc_dq_coord_t *dq, dfc_ab_coord_t *ab)
 {
     ab->alpha = dq->d * cos(phi) - dq->q * sin(phi);
@@ -716,46 +918,116 @@ void foc_inverse_clark_transform(dfc_ab_coord_t *ab, dfc_uvw_coord_t *uvw)
     uvw->w = -uvw->u - uvw->v; 
 }
 
-void twai_command_task(void *pvParameters)
+void calibration_procedure()
 {
-    twai_message_t message = {
-        .extd = 0,              // Standard Format message (11-bit ID)
-        .rtr = 0,               // Send a data frame
-        .ss = 1,                // Is single shot (won't retry on error or NACK)
-        .self = 0,              // Not a self reception request
-        .dlc_non_comp = 0,      // DLC is less than 8
+    ESP_LOGI("Calibration", "Started");
+    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
 
-        // Message ID and payload
-        .identifier = 0,
-        .data_length_code = 1,
-        .data = {0} 
-    };
+    dfc_el_phi_rad = 0;
+    dfc_dq_coord.d = 1;
+
+    foc_inverse_park_transform(dfc_el_phi_rad, &dfc_dq_coord, &dfc_ab_coord);
+    foc_inverse_clark_transform(&dfc_ab_coord, &dfc_uvw_coord);
+
+    dfc_duty_arr[0] = (int)(mcpwm_per * (dfc_uvw_coord.u / 4 + 1.0 / 4));
+    dfc_duty_arr[1] = (int)(mcpwm_per * (dfc_uvw_coord.v / 4 + 1.0 / 4));
+    dfc_duty_arr[2] = (int)(mcpwm_per * (dfc_uvw_coord.w / 4 + 1.0 / 4));
+
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[0], dfc_duty_arr[0]));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[1], dfc_duty_arr[1]));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[2], dfc_duty_arr[2]));
+
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    ESP_ERROR_CHECK(pcnt_unit_get_count(pcnt_unit, &foc_bias));
+
+    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
+
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[0], 0));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[1], 0));
+    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[2], 0));
+
+    flag_calibrated = true;
+    ESP_LOGI("Calibration", "bias = %d", foc_bias);
+    ESP_LOGI("Calibration", "calibrated succesful");
+}
+
+void twai_receive_task(void *pvParameters)
+{
+    int num_command = NUM_CMD_STOP;
     while (1)
     {
-        if (twai_receive(&message, pdMS_TO_TICKS(2000)) != ESP_OK)
+        num_command = NUM_CMD_ERROR;
+        if (twai_receive(&cmd_message, pdMS_TO_TICKS(4000)) != ESP_OK)
         {
             ESP_LOGE("TWAI", "Failed to receive");
         }
-        else
-        {
-            if (message.identifier == 2 && message.data[0] == 111 && current_task == 0)
+        else if (cmd_message.identifier == CAN_ID_COMMANDER)
+        {   
+            ESP_LOGI("rec", "");
+            if (cmd_message.data[0] == MIM_CMD_GROUP_NVS)
             {
-                xTaskCreate(dfc_task, "Direct_Field_Control", 4096, NULL, 2, &dfc_task_handle);
-                current_task = 1;
+                // TODO: добавить верификацию чтения и записи nvs 
+                if (cmd_message.data[1] == MIM_CMD_SAVE_TO_FLASH) num_command = NUM_CMD_SAVE_TO_FLASH;
+                else if (cmd_message.data[1] == MIM_CMD_READ_FROM_FLASH) num_command = NUM_CMD_READ_FROM_FLASH;
             }
-            else if (message.identifier == 2 && message.data[0] == 125 && current_task == 1)
+            else if (cmd_message.data[0] == MIM_CMD_GROUP_CONFIG)
             {
-                ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
-                ESP_ERROR_CHECK(gptimer_stop(gptimer));
-                vTaskDelete(dfc_task_handle);
-                current_task = 0;
+                if (cmd_message.data[1] == MIM_CMD_SEND_CONFIG) num_command = NUM_CMD_READ_CONFIG_FROM_DRV;
+                else if (cmd_message.data[1] == MIM_CMD_READ_DFC_SPEED) dfc_speed = mim_DECODE_FLOAT(cmd_message.data);
+                else if (cmd_message.data[1] == MIM_CMD_READ_DFC_CURRENT)
+                {
+                    dfc_current = mim_DECODE_FLOAT(cmd_message.data);
+                    if (dfc_current > 0)
+                    {
+                        dfc_current = (dfc_current > 1) ? 1 : fabs(dfc_current);
+                    }
+                    dfc_dq_coord.d = dfc_current;
+                } 
+                else if (cmd_message.data[1] == MIM_CMD_READ_FOC_CURRENT)
+                {
+                    foc_current = mim_DECODE_FLOAT(cmd_message.data);
+                    if (foc_current < 0)
+                    {
+                        foc_dir = -1;
+                        foc_dq_coord.d = (foc_current < -1) ? 1 : fabs(foc_current);
+                    }
+                    else
+                    {
+                        foc_dir = 1;
+                        foc_dq_coord.d = (foc_current > 1) ? 1 : foc_current;
+                    }
+                } 
+                else if (cmd_message.data[1] == MIM_CMD_READ_ESC_GOAL) esc_goal = mim_DECODE_FLOAT(cmd_message.data);
+                else if (cmd_message.data[1] == MIM_CMD_READ_SERVO_GOAL) servo_goal = mim_DECODE_INT16(cmd_message.data);
+
             }
-            else
+            else if (cmd_message.data[0] == MIM_CMD_GROUP_TELEMETRY)
             {
-                ESP_LOGE("Twai", "Wrong Data");
+                if (cmd_message.data[1] == MIM_CMD_SEND_TELEMETRY)
+                {
+                    num_command = NUM_CMD_TELEMETRY;
+                    if (mim_DECODE_INT16(cmd_message.data) == 1) flag_send_telemetry = true;
+                    else if (mim_DECODE_INT16(cmd_message.data) == 0) flag_send_telemetry = false;
+                }
             }
+            else if (cmd_message.data[0] == MIM_CMD_GROUP_MOTION_CONTROL)
+            {
+                if (cmd_message.data[1] == MIM_CMD_CALIBRATION) num_command = NUM_CMD_CALIBRATION; 
+                else if (cmd_message.data[1] == MIM_CMD_DFC) num_command = NUM_CMD_DFC;
+                else if (cmd_message.data[1] == MIM_CMD_FOC)
+                {
+                    num_command = NUM_CMD_FOC;
+                    ESP_LOGI("ffff", "");
+                } 
+                else if (cmd_message.data[1] == MIM_CMD_ESC) num_command = NUM_CMD_ESC;
+                else if (cmd_message.data[1] == MIM_CMD_SERVO) num_command = NUM_CMD_SERVO;
+                else if (cmd_message.data[1] == MIM_CMD_STOP) num_command = NUM_CMD_STOP;
+            }   
+            ESP_LOGI("twai", "%d", num_command);
+            if (num_command != NUM_CMD_ERROR) xQueueOverwrite(my_command_queue, &num_command);
         }
     }
+    vTaskDelete(NULL);
 }
 
 // Initializations
@@ -856,41 +1128,19 @@ void gptimer_init()
     ESP_ERROR_CHECK(gptimer_enable(gptimer));
 }
 
-void calibration()
+// Motion Control tasks
+
+void calibration_task(void *pvParameters)
 {
-    ESP_LOGI("Calibration", "Started");
-    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_START_NO_STOP));
-
-    dfc_el_phi_rad = 0;
-    foc_inverse_park_transform(dfc_el_phi_rad, &dfc_dq_coord, &dfc_ab_coord);
-    foc_inverse_clark_transform(&dfc_ab_coord, &dfc_uvw_coord);
-
-    dfc_duty_arr[0] = (int)(mcpwm_per * (dfc_uvw_coord.u / 4 + 1.0 / 4));
-    dfc_duty_arr[1] = (int)(mcpwm_per * (dfc_uvw_coord.v / 4 + 1.0 / 4));
-    dfc_duty_arr[2] = (int)(mcpwm_per * (dfc_uvw_coord.w / 4 + 1.0 / 4));
-
-    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[0], dfc_duty_arr[0]));
-    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[1], dfc_duty_arr[1]));
-    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[2], dfc_duty_arr[2]));
-
-    vTaskDelay(pdMS_TO_TICKS(1000));
-    ESP_ERROR_CHECK(pcnt_unit_get_count(pcnt_unit, &dfc_bias));
-
-    ESP_ERROR_CHECK(mcpwm_timer_start_stop(mcpwm_timer, MCPWM_TIMER_STOP_EMPTY));
-
-    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[0], 0));
-    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[1], 0));
-    ESP_ERROR_CHECK(mcpwm_comparator_set_compare_value(mcpwm_comparators[2], 0));
-    ESP_LOGI("Calibration", "bias = %d", dfc_bias);
-    ESP_LOGI("Calibration", "calibrated succesful");
+    calibration_procedure();
+    current_task = NUM_TASK_IDLE;
+    vTaskDelete(NULL);
 }
-
-// Command tasks
 
 void dfc_task(void *pvParameters)
 {
     ESP_LOGI("DFC", "Task started");
-    dfc_dq_coord.d = 1;
+    dfc_dq_coord.d = dfc_current;
     
     if (current_telemetry && !flag_mcpwm_cap_activated)
     {
@@ -940,10 +1190,19 @@ void dfc_task(void *pvParameters)
 void foc_task(void *pvParameters)
 {
     ESP_LOGI("FOC", "Task started");
-    dfc_dq_coord.d = 1;
-    dfc_dir = 1;
+    if (foc_current < 0)
+    {
+        foc_dir = -1;
+        foc_dq_coord.d = (foc_current < -1) ? 1 : fabs(foc_current);
+    }
+    else
+    {
+        foc_dir = 1;
+        foc_dq_coord.d = (foc_current > 1) ? 1 : foc_current;
+    }
 
-    calibration();
+    if (!flag_calibrated) calibration_procedure();
+
     if (!flag_mcpwm_cap_activated)
     {
         ESP_ERROR_CHECK(mcpwm_capture_timer_start(mcpwm_cap_timer));
@@ -962,7 +1221,7 @@ void foc_task(void *pvParameters)
             pcnt_unit_get_count(pcnt_unit, &(foc_cap_data.cur_pos));
         }
 
-        dfc_el_phi_deg = (float)(foc_cap_data.cur_pos - dfc_bias) / 2400 * 360 * 14 + dfc_dir * 90;
+        dfc_el_phi_deg = (float)(foc_cap_data.cur_pos - foc_bias) / 2400 * 360 * 14 + foc_dir * 90;
         if(dfc_el_phi_deg >= 360)
         {
             dfc_el_phi_deg -= 360;
@@ -973,12 +1232,12 @@ void foc_task(void *pvParameters)
         }
         dfc_el_phi_rad = dfc_el_phi_deg * M_PI / 180;
 
-        foc_inverse_park_transform(dfc_el_phi_rad, &dfc_dq_coord, &dfc_ab_coord);
-        foc_inverse_clark_transform(&dfc_ab_coord, &dfc_uvw_coord);
+        foc_inverse_park_transform(dfc_el_phi_rad, &foc_dq_coord, &foc_ab_coord);
+        foc_inverse_clark_transform(&foc_ab_coord, &foc_uvw_coord);
 
-        dfc_duty_arr[0] = (int)(mcpwm_per * (dfc_uvw_coord.u / 4 + 1.0 / 4));
-        dfc_duty_arr[1] = (int)(mcpwm_per * (dfc_uvw_coord.v / 4 + 1.0 / 4));
-        dfc_duty_arr[2] = (int)(mcpwm_per * (dfc_uvw_coord.w / 4 + 1.0 / 4));
+        dfc_duty_arr[0] = (int)(mcpwm_per * (foc_uvw_coord.u / 4 + 1.0 / 4));
+        dfc_duty_arr[1] = (int)(mcpwm_per * (foc_uvw_coord.v / 4 + 1.0 / 4));
+        dfc_duty_arr[2] = (int)(mcpwm_per * (foc_uvw_coord.w / 4 + 1.0 / 4));
 
         for (int i = 0; i < 3; i++)
         {
@@ -994,7 +1253,8 @@ void esc_task(void *pvParameters)
 
     // ESP_ERROR_CHECK(gptimer_set_alarm_action(gptimer, &gptimer_esc_alarm_config));
     
-    calibration();
+    if (!flag_calibrated) calibration_procedure();
+
     if (!flag_mcpwm_cap_activated)
     {
         ESP_ERROR_CHECK(mcpwm_capture_timer_start(mcpwm_cap_timer));
@@ -1039,7 +1299,7 @@ void esc_task(void *pvParameters)
             esc_u = esc_up + esc_ui;
 
             esc_dir = (esc_u > 0) ? 1 : -1;
-            esc_u = (abs(esc_u) > esc_u_max) ? esc_u_max : abs(esc_u);
+            esc_u = (fabs(esc_u) > esc_u_max) ? esc_u_max : fabs(esc_u);
 
             if (esc_cap_data.znak != esc_dir)
             {
@@ -1050,7 +1310,7 @@ void esc_task(void *pvParameters)
                 dfc_dq_coord.d = esc_u / esc_u_max;
             }
 
-            dfc_el_phi_deg = (float)(esc_cap_data.cur_pos - dfc_bias) / 2400 * 360 * 14 + esc_dir * 90;
+            dfc_el_phi_deg = (float)(esc_cap_data.cur_pos - foc_bias) / 2400 * 360 * 14 + esc_dir * 90;
             if(dfc_el_phi_deg >= 360)
             {
                 dfc_el_phi_deg -= 360;
@@ -1086,7 +1346,9 @@ void servo_task(void *pvParameters)
 {
     ESP_LOGI("Servo", "Task started");
     TickType_t xLastTake = 0;
-    calibration();
+
+    if (!flag_calibrated) calibration_procedure();
+
     if (!flag_mcpwm_cap_activated)
     {
         ESP_ERROR_CHECK(mcpwm_capture_timer_start(mcpwm_cap_timer));
@@ -1134,8 +1396,9 @@ void servo_task(void *pvParameters)
 
             servo_u = (servo_u > servo_u_max) ? servo_u_max : (servo_u < -servo_u_max) ? -servo_u_max : servo_u;
 
-            esc_goal = servo_speed_coef * servo_u;
-            esc_r = esc_goal - esc_avg;
+            esc_cur_goal = servo_speed_coef * servo_u;
+            esc_cur_goal = (esc_cur_goal > esc_max_speed) ? esc_max_speed : (esc_cur_goal < -esc_max_speed) ? - esc_max_speed : esc_cur_goal;
+            esc_r = esc_cur_goal - esc_avg;
             esc_up = esc_kp * esc_r;
 
             esc_ui += esc_ki * esc_r;
@@ -1143,7 +1406,7 @@ void servo_task(void *pvParameters)
             esc_u = esc_up + esc_ui;
 
             esc_dir = (esc_u > 0) ? 1 : -1;
-            esc_u = (abs(esc_u) > esc_u_max) ? esc_u_max : abs(esc_u);
+            esc_u = (fabs(esc_u) > esc_u_max) ? esc_u_max : fabs(esc_u);
 
             if (servo_cap_data.znak != esc_dir)
             {
@@ -1154,7 +1417,7 @@ void servo_task(void *pvParameters)
                 dfc_dq_coord.d = esc_u / esc_u_max;
             }
 
-            dfc_el_phi_deg = (float)(servo_cap_data.cur_pos - dfc_bias) / 2400 * 360 * 14 + esc_dir * 90;
+            dfc_el_phi_deg = (float)(servo_cap_data.cur_pos - foc_bias) / 2400 * 360 * 14 + esc_dir * 90;
             if(dfc_el_phi_deg >= 360)
             {
                 dfc_el_phi_deg -= 360;
@@ -1196,24 +1459,55 @@ void telemetry_task(void *pvParameters)
         ESP_ERROR_CHECK(mcpwm_capture_channel_enable(mcpwm_cap_channel_B));
         flag_mcpwm_cap_activated = true;
     }
+    float speed = 0;
 
     while (1)
     {
         if (xQueueReceive(telemetry_queue, &telemetry_cap_data, 0) != pdPASS)
         {
             mcpwm_capture_channel_trigger_soft_catch(mcpwm_cap_channel_A);
+            xQueueReceive(telemetry_queue, &telemetry_cap_data, 0);
         }
-        char *telemetry_to_send = build_telemetry_string();            
-        if (telemetry_to_send)
+
+        speed = (telemetry_cap_data.per != 0) ? speed_coef * (telemetry_cap_data.cur_pos - telemetry_cap_data.prev_pos) / (int32_t)telemetry_cap_data.per : 0;
+        if (flag_TWAI_en)
         {
-            int err = sendto(cmd.sock, telemetry_to_send, strlen(telemetry_to_send), 0, (struct sockaddr *)&cmd.source_addr, sizeof(struct sockaddr));
-            if (err < 0) 
-            {
-                ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-            }
+            mim_cmd_SEND_UINT32(CAN_ID_DRIVER, MIM_CMD_GROUP_TELEMETRY, MIM_CMD_READ_TIME, telemetry_cap_data.cur_tick, 0);
+            mim_cmd_SEND_INT16(CAN_ID_DRIVER, MIM_CMD_GROUP_TELEMETRY, MIM_CMD_READ_POS, telemetry_cap_data.cur_pos, 0);
+            mim_cmd_SEND_FLOAT(CAN_ID_DRIVER, MIM_CMD_GROUP_TELEMETRY, MIM_CMD_READ_SPEED, speed, 0);
+            mim_cmd_SEND_INT16(CAN_ID_DRIVER, MIM_CMD_GROUP_TELEMETRY, MIM_CMD_READ_END_OF_TELEMETRY, 1, 0);
         }
-        free(telemetry_to_send);
-        vTaskDelay(pdMS_TO_TICKS(100));
+
+        if (flag_WiFi_en)
+        {
+            cJSON *json = cJSON_CreateObject();
+            cJSON *telemetry = cJSON_CreateObject();
+
+            cJSON_AddNumberToObject(telemetry, "time", telemetry_cap_data.cur_tick / 800000);
+            cJSON_AddNumberToObject(telemetry, "pos", telemetry_cap_data.cur_pos);
+            cJSON_AddNumberToObject(telemetry, "speed", speed);
+            cJSON_AddNumberToObject(telemetry, "esc_cur_goal", esc_cur_goal);
+            cJSON_AddNumberToObject(telemetry, "esc_r", esc_r);
+            cJSON_AddNumberToObject(telemetry, "current", dfc_dq_coord.d * esc_dir);
+            cJSON_AddNumberToObject(telemetry, "servo_r", servo_r);
+            cJSON_AddNumberToObject(telemetry, "esc_avg", esc_avg);
+
+            cJSON_AddItemToObject(json, "telemetry", telemetry);
+
+            char *telemetry_to_send = cJSON_Print(json);            
+            if (telemetry_to_send)
+            {
+                int err = sendto(cmd.sock, telemetry_to_send, strlen(telemetry_to_send), 0, (struct sockaddr *)&cmd.source_addr, sizeof(struct sockaddr));
+                if (err < 0) 
+                {
+                    ESP_LOGE("Twai", "Error occurred during sending: errno %d", errno);
+                }
+            }
+            free(telemetry_to_send);
+            cJSON_Delete(json);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -1234,22 +1528,13 @@ void timer_task(void *pvParameters)
 // Main
 
 void app_main(void)
-{
+{ 
+    esc_max_speed = 2;
     pins_init();
     pcnt_init();
     mcpwm_pwm_init();
     mcpwm_capture_init();
     gptimer_init();
-
-    if (twai_driver_install(&g_config, &t_config, &f_config) != ESP_OK)
-    {
-        ESP_LOGI(TAG, "Failed to install twai driver");
-    }
-
-    if (twai_start() != ESP_OK)
-    {
-        ESP_LOGI(TAG, "Failed to start twai");
-    }
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) 
@@ -1261,30 +1546,48 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(err);
 
-    nvs_read_config();
+    // nvs_read_config();
 
-    t_eth_config eth_config = {
-        .ip             = g_ip_addr, 
-        .pass           = g_pass, 
-        .ssid           = g_ssid, 
-        .use_eth        = USE_COMMM_ETHERNET, 
-        .use_wifi_ap    = USE_COMMM_WIFI_AP, 
-        .use_wifi_sta   = USE_COMMM_WIFI_STA
-    };
-    eth_start(eth_config);
+    xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 2, NULL);
 
-    g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
-    assert(g_command_queue != NULL);
-
-    if (USE_COMMM_ETHERNET || USE_COMMM_WIFI_AP || USE_COMMM_WIFI_STA)
+    if (flag_WiFi_en)
     {
-        xTaskCreate(command_processing_task, "command_processor", 4096, NULL, 1, NULL);
-        xTaskCreate(udp_server_task, "udp_server", 4096, (void*)AF_INET, 1, NULL);
+        t_eth_config eth_config = {
+            .ip             = g_ip_addr, 
+            .pass           = g_pass, 
+            .ssid           = g_ssid, 
+            .use_eth        = USE_COMMM_ETHERNET, 
+            .use_wifi_ap    = USE_COMMM_WIFI_AP, 
+            .use_wifi_sta   = USE_COMMM_WIFI_STA
+        };
+        eth_start(eth_config);
+
+        g_command_queue = xQueueCreate(QUEUE_SIZE, COMMAND_MAX_SIZE);
+        assert(g_command_queue != NULL);
+
+        if (USE_COMMM_ETHERNET || USE_COMMM_WIFI_AP || USE_COMMM_WIFI_STA)
+        {
+            xTaskCreate(udp_server_task, "udp_server", 4096, (void*)AF_INET, 1, NULL);
+            xTaskCreate(ethernet_receive_task, "ethernet_recieve", 4096, (void*)AF_INET, 1, NULL);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    if (flag_TWAI_en)
+    {
+        if (twai_driver_install(&g_config, &t_config, &f_config) != ESP_OK)
+        {
+            ESP_LOGI(TAG, "Failed to install twai driver");
+        }
+        if (twai_start() != ESP_OK)
+        {
+            ESP_LOGI(TAG, "Failed to start twai");
+        }
 
-    xTaskCreate(twai_command_task, "Twai", 4096, NULL, 1, NULL);
+        xTaskCreate(twai_receive_task, "Twai", 4096, NULL, 1, NULL);
+    }
+    
     t_command cmd;
     while (1)
     {
