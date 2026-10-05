@@ -3,6 +3,7 @@
 
 #define CAN_ID_COMMANDER                        (111)
 #define CAN_ID_DRIVER                           (112)
+#define CAN_ID_ANOTHER                          (113)
 
 #define MIM_CMD_GROUP_CONFIG                    (001)
 #define MIM_CMD_GROUP_TELEMETRY                 (002)
@@ -22,6 +23,17 @@
 #define MIM_CMD_READ_FOC_CURRENT                (003)
 #define MIM_CMD_READ_ESC_GOAL                   (004)
 #define MIM_CMD_READ_SERVO_GOAL                 (005)
+#define MIM_CMD_READ_PWM_LIM                    (006)
+#define MIM_CMD_READ_SERVO_KP                   (007)
+#define MIM_CMD_READ_SERVO_KI                   (010)
+#define MIM_CMD_READ_SERVO_KD                   (011)
+#define MIM_CMD_READ_SERVO_UI_MAX               (012)
+#define MIM_CMD_READ_ESC_KP                     (013)
+#define MIM_CMD_READ_ESC_KI                     (014)
+#define MIM_CMD_READ_ESC_GAMMA                  (015)
+#define MIM_CMD_READ_SERVO_SPEED_COEF           (016)
+#define MIM_CMD_READ_ESC_MAX_SPEED              (017)
+
 #define MIM_CMD_READ_END_OF_CONFIG              (255)
 
 // Group Telemetry
@@ -30,6 +42,7 @@
 #define MIM_CMD_READ_TIME                       (001)
 #define MIM_CMD_READ_POS                        (002)
 #define MIM_CMD_READ_SPEED                      (003)
+#define MIM_CMD_READ_EL_PHASE                   (004)
 #define MIM_CMD_READ_END_OF_TELEMETRY           (255)
 
 // Group Motion Control
